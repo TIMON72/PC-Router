@@ -1,0 +1,9 @@
+[Unit]
+Description=systema-router network failsafe
+After=network.target
+
+[Service]
+Type=oneshot
+Environment=SYSTEMA_ROUTER_ROOT=/home/admin/PC-Router
+EnvironmentFile=-/home/admin/PC-Router/config.env
+ExecStart=/home/admin/PC-Router/scripts/network-failsafe.sh

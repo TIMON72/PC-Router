@@ -1,0 +1,15 @@
+[Unit]
+Description=LTE Failover Monitor
+After=network.target lte.service
+Wants=lte.service
+
+[Service]
+Type=simple
+Environment=SYSTEMA_ROUTER_ROOT=/home/admin/PC-Router
+EnvironmentFile=-/home/admin/PC-Router/config.env
+ExecStart=/home/admin/PC-Router/scripts/lte-failover.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

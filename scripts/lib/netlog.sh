@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Общее логирование systema-router
+# Использование: source $SYSTEMA_ROUTER_ROOT/scripts/lib/netlog.sh
+#   netlog EVENT message key=value ...
+
+NETLOG_DIR="${NETLOG_DIR:-/home/admin/PC-Router}"
+NETLOG_FILE="${NETLOG_FILE:-$NETLOG_DIR/logs.log}"
+NETLOG_STATE_DIR="${NETLOG_STATE_DIR:-/run/systema-router}"
+
+netlog_init() {
+    mkdir -p "$NETLOG_DIR" "$NETLOG_STATE_DIR" 2>/dev/null || true
+    touch "$NETLOG_FILE" 2>/dev/null || true
+    chmod 666 "$NETLOG_FILE" 2>/dev/null || true
+    # чтобы admin видел лог в домашнем проекте
+    if [[ "$NETLOG_FILE" == /home/admin/* ]]; then
+        chown admin:admin "$NETLOG_FILE" 2>/dev/null || true
+    fi
+}
+
+# netlog EVENT "human message" [k=v ...]
+netlog() {
+    local event="$1"
+    shift
+    local msg="${1:-}"
+    shift || true
+    local ts extras=""
+    ts="$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
+    local kv
+    for kv in "$@"; do
+        extras+=" ${kv}"
+    done
+    netlog_init
+    # CSV-friendly: timestamp|event|message|k=v...
+    printf '%s|%s|%s|%s\n' "$ts" "$event" "$msg" "${extras# }" >>"$NETLOG_FILE" 2>/dev/null || true
+    logger -t systema-router -p local0.info -- "${event}: ${msg}${extras}" 2>/dev/null || true
+}
+
+# Логировать только при смене состояния (edge-trigger)
+# netlog_edge STATE_KEY new_value EVENT_UP EVENT_DOWN "msg up" "msg down" [k=v...]
+netlog_edge() {
+    local key="$1" new="$2" ev_up="$3" ev_down="$4" msg_up="$5" msg_down="$6"
+    shift 6 || true
+    netlog_init
+    local f="$NETLOG_STATE_DIR/edge.${key}"
+    local old=""
+    [[ -f "$f" ]] && old="$(cat "$f" 2>/dev/null || true)"
+    if [[ "$old" == "$new" ]]; then
+        return 0
+    fi
+    echo "$new" >"$f"
+    if [[ "$new" == "1" || "$new" == "up" || "$new" == "ok" ]]; then
+        netlog "$ev_up" "$msg_up" "$@"
+    else
+        netlog "$ev_down" "$msg_down" "$@"
+    fi
+}

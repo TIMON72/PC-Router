@@ -1,0 +1,10 @@
+Старые одноразовые скрипты диагностики с домашней папки Windows (~/tko_*.py,
+~/run_failover_test_60.py и т.п.) не переносились as-is: в них были пароли и
+дубли. Их функции закрывают:
+
+  tests/diag/*           — snapshot / events
+  tests/scenarios/*      — wan-failover, lte-soft-fail, outage-dry
+  tests/remote/deploy.py — заливка проекта
+  tests/remote/run.py    — удалённый запуск
+
+Их можно удалить с диска вручную, когда убедитесь, что tests/ покрывает нужное.

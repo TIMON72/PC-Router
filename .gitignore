@@ -1,0 +1,36 @@
+﻿# Local site config (never commit)
+/config.env
+config.env.bak*
+*.bak.*
+
+# Runtime / state on device copies
+/state/*
+!/state/.gitkeep
+/logs.log*
+/lte-failover.log*
+*.log
+
+# Local agent / scratch
+/tmp/
+*_softfail_*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Secrets / VPN profiles accidentally dropped in tree
+pswd.dat
+*.pem
+*.key
+!docs/**

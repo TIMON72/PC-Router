@@ -1,0 +1,17 @@
+[Unit]
+Description=LTE PPP Connection
+After=local-fs.target
+
+[Service]
+Type=simple
+Environment=SYSTEMA_ROUTER_ROOT=/home/admin/PC-Router
+EnvironmentFile=-/home/admin/PC-Router/config.env
+ExecStartPre=/home/admin/PC-Router/scripts/lte-modem-init.sh
+ExecStartPre=-/usr/bin/pkill -f "pppd call lte"
+ExecStart=/usr/sbin/pppd call lte nodetach noipv6
+Restart=always
+RestartSec=15
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

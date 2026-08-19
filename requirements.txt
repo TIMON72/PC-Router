@@ -1,0 +1,21 @@
+# Единый список зависимостей PC-Router
+#
+# На роутере (apt):
+#   sudo bash scripts/install-deps.sh
+# ПК для tests/remote (pip):
+#   bash scripts/install-deps.sh --pip
+#
+# Строки «apt: пакет» — системные пакеты Ubuntu/Debian.
+# Остальные непустые строки без префикса apt: — пакеты pip.
+
+apt: dnsmasq
+apt: iptables-persistent
+apt: ppp
+apt: usb-modeswitch
+apt: openvpn
+apt: iproute2
+apt: iptables
+apt: curl
+apt: ca-certificates
+
+paramiko>=3.0
