@@ -11,8 +11,11 @@ Commands:
   list                 — список сценариев
   snap [label]         — диагностика (snapshot)
   events [N] [filter]  — хвост журнала
+  recover-selftest     — unit-check lib recovery (без железа)
   wan-failover [deadline] [dwell]
   lte-soft-fail [observe_sec]
+  lte-recover-ladder [observe_sec]
+  lte-apn-firstboot [observe_sec]
   outage-dry [max_wait_sec]
   help
 EOF
@@ -27,6 +30,9 @@ case "$cmd" in
     echo
     echo "scenarios:"
     ls -1 "$TESTS_ROOT/scenarios"/*.sh 2>/dev/null | xargs -n1 basename
+    echo
+    echo "diag:"
+    ls -1 "$TESTS_ROOT/diag"/*.sh 2>/dev/null | xargs -n1 basename
     ;;
   snap|snapshot)
     bash "$TESTS_ROOT/diag/snapshot.sh" "$@"
@@ -34,11 +40,20 @@ case "$cmd" in
   events|log)
     bash "$TESTS_ROOT/diag/recent-events.sh" "$@"
     ;;
+  recover-selftest|recover-lib)
+    bash "$TESTS_ROOT/diag/recover-lib-selftest.sh" "$@"
+    ;;
   wan-failover|wan)
     bash "$TESTS_ROOT/scenarios/wan-failover.sh" "$@"
     ;;
   lte-soft-fail|lte-soft)
     bash "$TESTS_ROOT/scenarios/lte-soft-fail.sh" "$@"
+    ;;
+  lte-recover-ladder|lte-ladder|recover-ladder)
+    bash "$TESTS_ROOT/scenarios/lte-recover-ladder.sh" "$@"
+    ;;
+  lte-apn-firstboot|apn-firstboot)
+    bash "$TESTS_ROOT/scenarios/lte-apn-firstboot.sh" "$@"
     ;;
   outage-dry|outage)
     bash "$TESTS_ROOT/scenarios/outage-escalation.sh" "$@"

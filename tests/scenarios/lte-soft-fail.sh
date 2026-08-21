@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Имитация «мягкого» провала LTE (ICMP DROP на ppp0): APN не должен смениться
-# сразу; ожидаем soft_fail_keep_apn, а next — только после APN_NEXT_AFTER_FAILS.
+# сразу; ожидаем ppp_keep_apn (лестница recovery), а apn_next — только после
+# PPP→CFUN→USB исчерпаны (или USB reseat / нет apn.last).
 # Usage: lte-soft-fail.sh [observe_sec]
 set -u
 # shellcheck disable=SC1091
@@ -41,8 +42,12 @@ fi
 
 apn_before="$("$SYSTEMA_ROUTER_ROOT/scripts/lte-apn-select.sh" show 2>/dev/null | awk -F= '/^current=/{print $2; exit}')"
 echo "APN before: $apn_before"
-# Короткий cooldown, но APN_NEXT_AFTER_FAILS=3 — за observe не должны уйти в next
-test_env_begin "$TESTS_ROOT/fixtures/fast-failover.env" "APN_NEXT_AFTER_FAILS=3" "LTE_RESTART_COOLDOWN=25"
+# Короткий cooldown; APN next отрезан cooldown'ом и большим числом PPP-попыток
+test_env_begin "$TESTS_ROOT/fixtures/fast-failover.env" \
+  "LTE_RECOVER_PPP_TRIES=5" \
+  "APN_NEXT_AFTER_FAILS=5" \
+  "APN_NEXT_COOLDOWN_SEC=86400" \
+  "LTE_RESTART_COOLDOWN=25"
 sleep 2
 snap BEFORE
 
@@ -55,10 +60,10 @@ netlog TEST_HOLD "ICMP DROP на LTE для soft-fail" iface="$LTE_IF"
 # Если сейчас path=lte, failover должен рестартить с keep_apn
 deadline=$(( $(date +%s) + OBSERVE_SEC ))
 while (( $(date +%s) < deadline )); do
-  if log_tail 80 'LTE_RESTART' | grep -q 'soft_fail_keep_apn'; then
+  if log_tail 80 'LTE_RESTART' | grep -Eq 'ppp_keep_apn|cfun_keep_apn|usb_reset_keep_apn|soft_fail_keep_apn'; then
     saw_keep=1
   fi
-  if log_tail 80 'LTE_RESTART' | grep -q 'soft_fail_apn_next'; then
+  if log_tail 80 'LTE_RESTART' | grep -Eq 'reason=apn_next|soft_fail_apn_next'; then
     saw_next=1
   fi
   sleep 5
@@ -73,11 +78,11 @@ echo "saw_keep=$saw_keep saw_next=$saw_next"
 
 # Успех: либо увидели keep, либо APN не сменился (и next не обязан был случиться за окно)
 if [[ "$saw_next" -eq 1 && "$apn_before" != "$apn_after" && "$saw_keep" -eq 0 ]]; then
-  echo "FAIL: APN сменился без soft_fail_keep_apn"
+  echo "FAIL: APN сменился без keep-стадии recovery"
   exit 1
 fi
 if [[ "$apn_before" != "$apn_after" && "$saw_next" -eq 0 ]]; then
-  echo "WARN: APN изменился без soft_fail_apn_next в хвосте лога"
+  echo "WARN: APN изменился без apn_next в хвосте лога"
 fi
 echo "PASS lte-soft-fail (keep=$saw_keep next=$saw_next apn ${apn_before}->${apn_after})"
 exit 0

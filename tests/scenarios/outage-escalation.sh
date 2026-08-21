@@ -78,10 +78,19 @@ while (( $(date +%s) < deadline )); do
 done
 
 snap AFTER
-if [[ "$saw_dry" -ne 1 ]]; then
-  echo "FAIL: не увидели REBOOT_DRY за ${MAX_WAIT}s"
-  log_tail 40 'OUTAGE_|REBOOT|FAILSAFE'
-  exit 1
+if [[ "$saw_dry" -eq 1 ]]; then
+  echo "PASS outage-escalation (REBOOT_DRY)"
+  exit 0
 fi
-echo "PASS outage-escalation (REBOOT_DRY)"
-exit 0
+# Эскалация могла пройти (level/last_reboot), а запись REBOOT_DRY — не попасть в хвост лога
+if [[ -f "$OUTAGE_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$OUTAGE_FILE" || true
+  if [[ "${level:-0}" -gt 0 && "${last_reboot:-0}" -gt 0 ]]; then
+    echo "PASS outage-escalation (level=$level last_reboot=$last_reboot; REBOOT_DRY missed in log tail)"
+    exit 0
+  fi
+fi
+echo "FAIL: не увидели REBOOT_DRY за ${MAX_WAIT}s"
+log_tail 40 'OUTAGE_|REBOOT|FAILSAFE'
+exit 1

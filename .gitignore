@@ -2,6 +2,8 @@
 /config.env
 config.env.bak*
 *.bak.*
+deploy/config.env
+tests/tests.log
 
 # Runtime / state on device copies
 /state/*

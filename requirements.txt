@@ -2,7 +2,7 @@
 #
 # На роутере (apt):
 #   sudo bash scripts/install-deps.sh
-# ПК для tests/remote (pip):
+# ПК для deploy/ (pip):
 #   bash scripts/install-deps.sh --pip
 #
 # Строки «apt: пакет» — системные пакеты Ubuntu/Debian.

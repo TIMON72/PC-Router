@@ -36,12 +36,19 @@ OPENVPN_UNIT="${OPENVPN_UNIT:-openvpn@vpn.service}"
 LTE_UNIT="${LTE_UNIT:-lte.service}"
 LAN_NET="${LAN_NET:-192.168.50.0/24}"
 APN_SELECT_BIN="${LTE_APN_SELECT:-$SYSTEMA_ROUTER_ROOT/scripts/lte-apn-select.sh}"
-# Менять APN только после N «мягких» провалов подряд (модем на месте, но нет интернета)
+# Совместимость: сколько PPP-попыток (keep APN) до эскалации на CFUN/USB/APN
 APN_NEXT_AFTER_FAILS="${APN_NEXT_AFTER_FAILS:-3}"
+LTE_RECOVER_PPP_TRIES="${LTE_RECOVER_PPP_TRIES:-$APN_NEXT_AFTER_FAILS}"
+LTE_RECOVER_CFUN_TRIES="${LTE_RECOVER_CFUN_TRIES:-1}"
+LTE_RECOVER_USB_TRIES="${LTE_RECOVER_USB_TRIES:-1}"
+# Мин. интервал между APN next, если USB не пересаживали (узкий перебор)
+APN_NEXT_COOLDOWN_SEC="${APN_NEXT_COOLDOWN_SEC:-900}"
 SOFT_FAIL_FILE="${NETLOG_STATE_DIR:-/run/systema-router}/lte.softfail"
 # Оверрайды ускоренных тестов (tests/ → /run/systema-router/test.env)
 # shellcheck disable=SC1091
 [[ -f /run/systema-router/test.env ]] && source /run/systema-router/test.env
+# shellcheck disable=SC1091
+source "$SYSTEMA_ROUTER_ROOT/scripts/lib/lte-modem-recover.sh"
 
 # Нормализация режима
 case "$EDGE_MODE" in
@@ -260,27 +267,104 @@ lte_restart_running() {
     [[ -n "$lte_restart_pid" ]] && kill -0 "$lte_restart_pid" 2>/dev/null
 }
 
-modem_present() {
-    local d="${LTE_MODEM_DEV:-/dev/ttyUSB0}"
-    [[ -e "$d" ]] || ls /dev/ttyUSB* >/dev/null 2>&1
-}
-
-soft_fail_count() {
-    [[ -f "$SOFT_FAIL_FILE" ]] && cat "$SOFT_FAIL_FILE" || echo 0
-}
-
-soft_fail_bump() {
-    local n
-    mkdir -p "$(dirname "$SOFT_FAIL_FILE")"
-    n="$(soft_fail_count)"
-    n=$((n + 1))
-    echo "$n" >"$SOFT_FAIL_FILE"
-    echo "$n"
-}
+modem_present() { lte_modem_present; }
 
 soft_fail_reset() {
     mkdir -p "$(dirname "$SOFT_FAIL_FILE")"
     echo 0 >"$SOFT_FAIL_FILE"
+    lte_recover_reset_progress
+    lte_apn_wide_set 0
+}
+
+# Нет подтверждённого APN → широкий перебор раньше (первый запуск / после смены SIM)
+# (lte_has_last_apn — в lib/lte-modem-recover.sh)
+
+# Стадии: 0=ppp keep APN, 1=CFUN, 2=USB reset, 3=APN next
+lte_recover_pick_action() {
+    local stage fails ppp_tries cfun_tries usb_tries
+    stage="$(lte_recover_stage_get)"
+    fails="$(lte_recover_stage_fails_get)"
+    ppp_tries="${LTE_RECOVER_PPP_TRIES:-3}"
+    cfun_tries="${LTE_RECOVER_CFUN_TRIES:-1}"
+    usb_tries="${LTE_RECOVER_USB_TRIES:-1}"
+
+    # USB reseat → wide; начинаем с keep last, затем быстрый APN
+    if [[ -f "$LTE_USB_RESEAT_FLAG" ]]; then
+        lte_apn_wide_set 1
+    fi
+
+    # Нет apn.last: одна PPP-попытка, затем сразу apn_next (wide).
+    # Не уходим в CFUN/USB — на первом boot важнее перебрать APN.
+    if ! lte_has_last_apn; then
+        lte_apn_wide_set 1
+        if [[ "$stage" -eq 0 && "$fails" -lt 1 ]]; then
+            echo "ppp_keep_apn"
+            return
+        fi
+        lte_recover_stage_set 3
+        echo "apn_next"
+        return
+    fi
+
+    case "$stage" in
+      0)
+        if [[ "$fails" -ge "$ppp_tries" ]]; then
+          lte_recover_stage_set 1
+          echo "cfun_keep_apn"
+          return
+        fi
+        echo "ppp_keep_apn"
+        ;;
+      1)
+        if [[ "$fails" -ge "$cfun_tries" ]]; then
+          lte_recover_stage_set 2
+          echo "usb_reset_keep_apn"
+          return
+        fi
+        echo "cfun_keep_apn"
+        ;;
+      2)
+        if [[ "$fails" -ge "$usb_tries" ]]; then
+          lte_recover_stage_set 3
+          echo "apn_next"
+          return
+        fi
+        echo "usb_reset_keep_apn"
+        ;;
+      *)
+        echo "apn_next"
+        ;;
+    esac
+}
+
+lte_recover_wait_up() {
+    local reason="$1" i
+    local loops="${LTE_RECOVER_WAIT_LOOPS:-36}"
+    local sleep_s="${LTE_RECOVER_WAIT_SLEEP:-5}"
+    [[ "$loops" =~ ^[0-9]+$ ]] || loops=36
+    [[ "$sleep_s" =~ ^[0-9]+$ ]] || sleep_s=5
+    (( loops < 1 )) && loops=1
+    (( sleep_s < 1 )) && sleep_s=1
+    for ((i = 1; i <= loops; i++)); do
+        if iface_has_ipv4 "$LTE_IF" && check_internet_on "$LTE_IF"; then
+            soft_fail_reset
+            rm -f "$LTE_USB_RESEAT_FLAG" 2>/dev/null || true
+            [[ -x "$APN_SELECT_BIN" ]] && "$APN_SELECT_BIN" success >/dev/null 2>&1 || true
+            netlog LTE_UP "LTE снова в сети после restart" iface="$LTE_IF" reason="$reason"
+            if ! wan_link_ready || ! check_internet_on "$WAN_IF"; then
+                clear_defaults_via "$WAN_IF"
+                ip route replace default dev "$LTE_IF" metric 100
+                ensure_nat_for_uplink "$LTE_IF"
+                echo "lte" >"${STATE_FILE}.pathhint"
+            fi
+            if [[ "$EDGE_MODE" == "vpn" ]]; then
+                systemctl restart "$OPENVPN_UNIT" || true
+            fi
+            return 0
+        fi
+        sleep "$sleep_s"
+    done
+    return 1
 }
 
 restart_lte_stack_bg() {
@@ -294,71 +378,120 @@ restart_lte_stack_bg() {
     last_lte_restart_ts="$(date +%s)"
     save_state "${current_path:-lte}"
 
-    local reason="no_internet"
-    local change_apn=0
-    if ! modem_present; then
+    local reason presence
+    presence="$(lte_usb_presence_tick)"
+    if [[ "$presence" == "missing" ]] && ! modem_present; then
         reason="usb_missing"
-        netlog LTE_RESTART "Ожидание USB-модема / restart LTE" reason="$reason"
     else
-        local fails
-        fails="$(soft_fail_bump)"
-        if [[ "$fails" -ge "$APN_NEXT_AFTER_FAILS" ]]; then
-            change_apn=1
-            soft_fail_reset
-            reason="soft_fail_apn_next"
-        else
-            reason="soft_fail_keep_apn"
+        reason="$(lte_recover_pick_action)"
+        if [[ "$reason" == "apn_next" ]] && ! lte_apn_next_allowed; then
+            log "APN next отложен (cooldown ${APN_NEXT_COOLDOWN_SEC:-900}s) — USB reset"
+            netlog APN_NEXT_WAIT "APN next отложен cooldown" \
+              cooldown_sec="${APN_NEXT_COOLDOWN_SEC:-900}" last_ts="$(lte_last_apn_next_ts)"
+            reason="usb_reset_keep_apn"
         fi
-        netlog LTE_RESTART "Перезапуск LTE стека" reason="$reason" soft_fails="$fails" apn_next="$change_apn"
     fi
+
+    local stage_fails=0
+    if [[ "$reason" != "usb_missing" ]]; then
+        stage_fails="$(lte_recover_stage_fails_bump)"
+    fi
+    netlog LTE_RESTART "Перезапуск LTE стека" reason="$reason" stage="$(lte_recover_stage_get)" \
+      stage_fails="$stage_fails" wide="$(lte_apn_wide_get && echo 1 || echo 0)" \
+      generation="$(lte_usb_generation)"
     log "Фоновый перезапуск LTE ($reason)"
 
     (
-        # USB пропал: ждём возврат устройства, APN не меняем (та же SIM вероятнее всего)
-        if [[ "$reason" == "usb_missing" ]]; then
-            local w
-            for ((w = 1; w <= 90; w++)); do
-                if modem_present; then
-                    netlog LTE_MODEM_BACK "USB-модем снова в системе" waited_s="$w"
-                    break
-                fi
-                sleep 1
-            done
-            if ! modem_present; then
-                netlog LTE_RESTART_FAIL "Модем так и не появился" waited_s=90
+        set +e
+        case "$reason" in
+          usb_missing)
+            local waited
+            if waited="$(lte_wait_modem 90)"; then
+                netlog LTE_MODEM_BACK "USB-модем снова в системе" waited_s="$waited"
+                # presence_tick на следующем цикле зафиксирует reseat; здесь — last APN
+                [[ -x "$APN_SELECT_BIN" ]] && "$APN_SELECT_BIN" reapply-last >/dev/null 2>&1 || true
+            else
+                netlog LTE_RESTART_FAIL "Модем так и не появился" waited_s=90 reason="$reason"
+                exit 1
+            fi
+            systemctl restart "$LTE_UNIT" || true
+            ;;
+          ppp_keep_apn)
+            [[ -x "$APN_SELECT_BIN" ]] && "$APN_SELECT_BIN" reapply-last >/dev/null 2>&1 || true
+            systemctl restart "$LTE_UNIT" || true
+            ;;
+          cfun_keep_apn)
+            systemctl stop "$LTE_UNIT" 2>/dev/null || true
+            sleep 1
+            lte_modem_cfun_bounce || true
+            [[ -x "$APN_SELECT_BIN" ]] && "$APN_SELECT_BIN" reapply-last >/dev/null 2>&1 || true
+            systemctl restart "$LTE_UNIT" || true
+            ;;
+          usb_reset_keep_apn)
+            systemctl stop "$LTE_UNIT" 2>/dev/null || true
+            sleep 1
+            lte_modem_usb_reset || true
+            if ! lte_wait_modem 90 >/dev/null; then
+                netlog LTE_RESTART_FAIL "Модем не появился после USB reset" reason="$reason"
                 exit 1
             fi
             [[ -x "$APN_SELECT_BIN" ]] && "$APN_SELECT_BIN" reapply-last >/dev/null 2>&1 || true
-        elif [[ $change_apn -eq 1 ]]; then
+            systemctl restart "$LTE_UNIT" || true
+            ;;
+          apn_next)
+            systemctl stop "$LTE_UNIT" 2>/dev/null || true
+            sleep 1
             if [[ -x "$APN_SELECT_BIN" ]]; then
-                "$APN_SELECT_BIN" next >/dev/null 2>&1 || true
+                if lte_apn_wide_get || [[ -f "$LTE_USB_RESEAT_FLAG" ]] || ! lte_has_last_apn; then
+                    # Пересобрать список под новый IMSI / с нуля
+                    "$APN_SELECT_BIN" select >/dev/null 2>&1 || true
+                    # Если last уже пробовали — сразу next
+                    if lte_has_last_apn && [[ -f "$LTE_USB_RESEAT_FLAG" ]]; then
+                        "$APN_SELECT_BIN" next >/dev/null 2>&1 || true
+                    fi
+                else
+                    "$APN_SELECT_BIN" next >/dev/null 2>&1 || true
+                fi
                 "$APN_SELECT_BIN" apply >/dev/null 2>&1 || true
             fi
-        else
-            [[ -x "$APN_SELECT_BIN" ]] && "$APN_SELECT_BIN" reapply-last >/dev/null 2>&1 || true
+            lte_mark_apn_next_ts
+            rm -f "$LTE_USB_RESEAT_FLAG" 2>/dev/null || true
+            systemctl restart "$LTE_UNIT" || true
+            ;;
+          *)
+            systemctl restart "$LTE_UNIT" || true
+            ;;
+        esac
+
+        if lte_recover_wait_up "$reason"; then
+            exit 0
         fi
 
-        systemctl restart "$LTE_UNIT" || true
-        local i
-        for ((i = 1; i <= 36; i++)); do
-            if iface_has_ipv4 "$LTE_IF" && check_internet_on "$LTE_IF"; then
-                soft_fail_reset
-                [[ -x "$APN_SELECT_BIN" ]] && "$APN_SELECT_BIN" success >/dev/null 2>&1 || true
-                netlog LTE_UP "LTE снова в сети после restart" iface="$LTE_IF" reason="$reason"
-                if ! wan_link_ready || ! check_internet_on "$WAN_IF"; then
-                    clear_defaults_via "$WAN_IF"
-                    ip route replace default dev "$LTE_IF" metric 100
-                    ensure_nat_for_uplink "$LTE_IF"
-                    echo "lte" >"${STATE_FILE}.pathhint"
-                fi
-                if [[ "$EDGE_MODE" == "vpn" ]]; then
-                    systemctl restart "$OPENVPN_UNIT" || true
-                fi
-                exit 0
+        # Эскалация стадии после неудачи текущей попытки
+        case "$reason" in
+          ppp_keep_apn)
+            if ! lte_has_last_apn; then
+              lte_recover_stage_set 3
+            elif [[ "$(lte_recover_stage_fails_get)" -ge "${LTE_RECOVER_PPP_TRIES:-3}" ]]; then
+              lte_recover_stage_set 1
             fi
-            sleep 5
-        done
-        netlog LTE_RESTART_FAIL "LTE не поднялся после restart" iface="$LTE_IF" reason="$reason"
+            ;;
+          cfun_keep_apn)
+            if [[ "$(lte_recover_stage_fails_get)" -ge "${LTE_RECOVER_CFUN_TRIES:-1}" ]]; then
+              lte_recover_stage_set 2
+            fi
+            ;;
+          usb_reset_keep_apn)
+            if [[ "$(lte_recover_stage_fails_get)" -ge "${LTE_RECOVER_USB_TRIES:-1}" ]]; then
+              lte_recover_stage_set 3
+            fi
+            ;;
+          apn_next)
+            lte_recover_stage_set 3
+            ;;
+        esac
+        netlog LTE_RESTART_FAIL "LTE не поднялся после restart" iface="$LTE_IF" reason="$reason" \
+          next_stage="$(lte_recover_stage_get)"
         exit 1
     ) &
     lte_restart_pid=$!
@@ -410,6 +543,13 @@ netlog FAILOVER_START "Сервис failover запущен" wan="$WAN_IF" lte="
 
 while true; do
     clear_stale_test_holds
+    # Детект извлечения/вставки USB (смена SIM) даже без LTE-restart
+    case "$(lte_usb_presence_tick)" in
+      reseat)
+        log "USB reseat — разрешён широкий APN-перебор (gen=$(lte_usb_generation))"
+        [[ -x "$APN_SELECT_BIN" ]] && "$APN_SELECT_BIN" invalidate-cache >/dev/null 2>&1 || true
+        ;;
+    esac
 
     # подхват pathhint из фонового LTE restart
     if [[ -f "${STATE_FILE}.pathhint" ]]; then

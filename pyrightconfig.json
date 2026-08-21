@@ -1,0 +1,16 @@
+{
+  "include": ["deploy"],
+  "exclude": ["tmp", "tests", "scripts"],
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": false,
+  "reportExplicitAny": false,
+  "reportAny": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownParameterType": false,
+  "reportUnknownLambdaType": false,
+  "reportUnusedCallResult": false,
+  "reportUnnecessaryComparison": false,
+  "reportImplicitStringConcatenation": false
+}

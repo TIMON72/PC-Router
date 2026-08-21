@@ -237,8 +237,13 @@ case "$cmd" in
     echo "list:"
     cat "$LIST_FILE" 2>/dev/null || true
     ;;
+  --invalidate-cache|invalidate-cache)
+    rm -f "$IMSI_CACHE" "$LIST_FILE" "$IDX_FILE" 2>/dev/null || true
+    netlog APN_CACHE_CLEAR "Сброшен IMSI/APN try-list cache"
+    echo "ok"
+    ;;
   *)
-    echo "usage: $0 {select|next|apply|reapply-last|success|show}" >&2
+    echo "usage: $0 {select|next|apply|reapply-last|success|show|invalidate-cache}" >&2
     exit 2
     ;;
 esac

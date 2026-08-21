@@ -202,24 +202,39 @@ sudo bash /home/admin/PC-Router/scripts/netlog-show.sh 50
 - LAN-адрес на `LAN_IF`;
 - при VPN — интерфейс `tun0` с адресом площадки.
 
+### LTE recovery (если PPP «молчит», а WiFi модема жив)
+
+Failover поднимает LTE по лестнице, а не сразу крутит весь список APN:
+
+1. PPP restart с тем же APN  
+2. `AT+CFUN` (radio bounce)  
+3. USB reset устройства  
+4. APN next (медленно, с `APN_NEXT_COOLDOWN_SEC`)  
+5. Перед outage-reboot failsafe ещё раз делает USB reset и отменяет reboot, если интернет ожил  
+
+Широкий APN-перебор включается, если нет `state/apn.last` или USB-модем извлекали/вставляли (типичная смена SIM).
+
 ---
 
 ## 10. Обновление кода на уже работающей площадке
 
+На устройстве (локально):
+
 ```bash
-# залить новое дерево в /home/admin/PC-Router
-# config.env и state/ НЕ затирать
+# config.env и state/ не затирать
 cd /home/admin/PC-Router
 sudo bash scripts/upgrade-failover.sh
 ```
 
-С ПК (не перезаписывает `config.env`):
+С рабочей станции (модуль `deploy/`; `config.env` площадки на устройстве не перезаписывается):
 
 ```powershell
-$env:SYSTEMA_HOST="…"; $env:SYSTEMA_USER="admin"; $env:SYSTEMA_PASS="…"
-# при необходимости: $env указывает на хост; REMOTE_ROOT = /home/admin/PC-Router
-python tests/remote/deploy.py
+copy deploy\config.env.example deploy\config.env
+# указать PASS в секции целевого устройства
+python -m deploy pc-62 push
 ```
+
+Подробнее: [`deploy/README.md`](../deploy/README.md).
 
 ---
 
@@ -229,12 +244,13 @@ python tests/remote/deploy.py
 
 | Путь | Назначение |
 |------|------------|
-| `config.env` | Конфиг площадки |
-| `state/` | APN last, outage state |
+| `config.env` | Конфигурация площадки |
+| `state/` | APN last, outage state, usb.generation |
 | `conf/apn-profiles.conf` | База APN |
-| `scripts/` | Логика failover / NAT / DHCP |
-| `logs.log`, `lte-failover.log` | Журналы |
-| `tests/` | Диагностика |
+| `scripts/` | Failover, NAT, DHCP |
+| `logs.log`, `lte-failover.log` | Журналы runtime |
+| `tests/` | Диагностика и сценарии на устройстве |
+| `deploy/` | CLI выкладки и удалённых тестов (с ПК) |
 | `systemd/` | Шаблоны unit (копируются в `/etc`) |
 
 ### Только в системе
@@ -251,7 +267,11 @@ python tests/remote/deploy.py
 
 ---
 
-## 12. Тесты (опционально)
+## 12. Тесты
+
+Полное описание: [`tests/README.md`](../tests/README.md).
+
+На устройстве:
 
 ```bash
 sudo bash /home/admin/PC-Router/tests/run.sh list
@@ -259,6 +279,15 @@ sudo bash /home/admin/PC-Router/tests/run.sh snap
 sudo bash /home/admin/PC-Router/tests/run.sh wan-failover 120 40
 sudo bash /home/admin/PC-Router/tests/run.sh outage-dry
 ```
+
+С рабочей станции:
+
+```powershell
+python -m deploy pc-62 test --all 1h
+python -m deploy pc-62 test snap
+```
+
+Журнал удалённых прогонов: `tests/tests.log`.
 
 ---
 

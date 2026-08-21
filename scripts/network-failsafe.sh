@@ -151,7 +151,9 @@ fi
 if [[ "$REBOOT_ON_OUTAGE" != "1" ]]; then
   exit 0
 fi
-if [[ -f /tmp/hold-wan-down ]]; then
+# hold-wan-down — защита от reboot во время коротких WAN-тестов;
+# в REBOOT_DRY_RUN эскалацию разрешаем (outage-dry / CI).
+if [[ -f /tmp/hold-wan-down && "${REBOOT_DRY_RUN:-0}" != "1" ]]; then
   exit 0
 fi
 
@@ -189,5 +191,26 @@ logger -t systema-router -p local0.err -- "REBOOT due to outage level=$old_level
 # Небольшая пауза, чтобы лог успел сброситься на диск
 sleep 2
 sync
+
+# Перед soft-reboot ОС попробовать USB-reset модема (часто чинит data path без hard power)
+# shellcheck disable=SC1091
+source "${SYSTEMA_ROUTER_ROOT}/scripts/lib/lte-modem-recover.sh" 2>/dev/null || true
+if type lte_modem_usb_reset >/dev/null 2>&1; then
+  netlog REBOOT_USB_RESET "USB reset модема перед outage-reboot"
+  systemctl stop "${LTE_UNIT:-lte.service}" 2>/dev/null || true
+  sleep 1
+  lte_modem_usb_reset || true
+  lte_wait_modem 30 >/dev/null 2>&1 || true
+  # Короткая проверка: если интернет ожил — отменить reboot и сбросить outage
+  if internet_ok; then
+    netlog REBOOT_ABORTED "Интернет после USB reset — reboot отменён"
+    outage_clear
+    echo 0 >"$ST"
+    systemctl start "${LTE_UNIT:-lte.service}" 2>/dev/null || true
+    systemctl start lte-failover.service 2>/dev/null || true
+    exit 0
+  fi
+fi
+
 /sbin/reboot || systemctl reboot
 exit 0
