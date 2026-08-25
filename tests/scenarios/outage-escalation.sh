@@ -52,16 +52,16 @@ EOF
 test_env_begin "$TESTS_ROOT/fixtures/fast-outage.env"
 snap BEFORE
 
-echo ">>> block ping targets (simulate total outage)"
+echo ">>> block failsafe probe targets (keep LTE/VPN for SSH)"
+# Только probe-хосты failsafe — не режем весь ICMP на LTE: иначе падает VPN и suite теряет SSH.
 ip route replace blackhole 8.8.8.8 2>/dev/null || true
 ip route replace blackhole 1.1.1.1 2>/dev/null || true
 iptables -I OUTPUT -d 8.8.8.8 -p icmp -j DROP 2>/dev/null || true
 iptables -I OUTPUT -d 1.1.1.1 -p icmp -j DROP 2>/dev/null || true
-# WAN hard-down тоже (как при обрыве)
+# WAN hard-down (как при обрыве кабеля); uplink остаётся через LTE
 touch /tmp/hold-wan-down
 ip link set "$WAN_IF" down 2>/dev/null || true
 clear_icmp_drop_lte
-iptables -I OUTPUT -o "$LTE_IF" -p icmp -j DROP 2>/dev/null || true
 
 deadline=$(( $(date +%s) + MAX_WAIT ))
 while (( $(date +%s) < deadline )); do

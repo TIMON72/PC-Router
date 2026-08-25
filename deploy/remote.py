@@ -5,14 +5,29 @@ See deploy/config.env.example.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import paramiko  # type: ignore
 
 _DEPLOY_DIR = Path(__file__).resolve().parent
 _CONFIG = _DEPLOY_DIR / "config.env"
+
+
+def quiet_paramiko() -> None:
+    """Глушим paramiko: иначе при обрыве VPN в консоль лезет 'Socket exception: …10054'."""
+    for name in ("paramiko", "paramiko.transport"):
+        log = logging.getLogger(name)
+        log.setLevel(logging.CRITICAL)
+        log.propagate = False
+        log.handlers.clear()
+
+
+quiet_paramiko()
 
 
 def _parse_env_file(path: Path) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
@@ -167,22 +182,29 @@ def env_creds() -> tuple[str, str, str]:
     return host, user, password
 
 
-def connect() -> paramiko.SSHClient:
+def connect(
+    *,
+    fatal: bool = True,
+    quiet: bool = False,
+    timeout: float = 25,
+) -> paramiko.SSHClient:
+    """Open SSH. If fatal=False, raise on error (for suite reconnect); else sys.exit(1)."""
     host, user, password = env_creds()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     key = os.environ.get("SYSTEMA_SSH_KEY") or _cfg("SSH_KEY", default="")
     target = f"{user}@{host}"
-    print(
-        f"SSH {target} (ACTIVE={active_id()} {device_name() or ''})".strip()
-    )
+    if not quiet:
+        print(
+            f"SSH {target} (ACTIVE={active_id()} {device_name() or ''})".strip()
+        )
     try:
         if key:
             client.connect(
                 hostname=host,
                 username=user,
                 key_filename=key,
-                timeout=25,
+                timeout=timeout,
                 allow_agent=False,
                 look_for_keys=False,
             )
@@ -191,7 +213,7 @@ def connect() -> paramiko.SSHClient:
                 hostname=host,
                 username=user,
                 password=password,
-                timeout=25,
+                timeout=timeout,
                 allow_agent=False,
                 look_for_keys=False,
             )
@@ -201,9 +223,42 @@ def connect() -> paramiko.SSHClient:
             reason = "timeout"
         elif "Authentication" in type(e).__name__ or "auth" in str(e).lower():
             reason = "auth failed"
-        print(f"SSH failed: {target} ({reason})", file=sys.stderr)
-        sys.exit(1)
+        if not quiet:
+            print(f"SSH failed: {target} ({reason})", file=sys.stderr)
+        if fatal:
+            sys.exit(1)
+        raise
     return client
+
+
+# Optional hook from deploy.tests — перенос строки перед долгим SSH wait
+before_reconnect_log: Callable[[], None] | None = None
+
+
+def reconnect_with_retry(
+    *,
+    # Крайнее время на подъём VPN после WAN↓ / ladder (без логов по попыткам)
+    deadline_sec: float = 180.0,
+    connect_timeout: float = 30.0,
+    retry_pause_sec: float = 10.0,
+) -> paramiko.SSHClient:
+    """Тихо ждать SSH до deadline_sec; иначе ConnectionError → тест FAIL."""
+    if before_reconnect_log is not None:
+        before_reconnect_log()
+    last: BaseException | None = None
+    deadline = time.time() + deadline_sec
+    while time.time() < deadline:
+        try:
+            return connect(fatal=False, quiet=True, timeout=connect_timeout)
+        except (TimeoutError, OSError, paramiko.SSHException) as e:
+            last = e
+            left = deadline - time.time()
+            if left <= 0:
+                break
+            time.sleep(min(retry_pause_sec, max(1.0, left)))
+    raise ConnectionError(
+        f"SSH not back within {int(deadline_sec)}s"
+    ) from last
 
 
 def sudo_prefix(password: str) -> str:
@@ -229,15 +284,22 @@ def run(
         shown = shown.replace(password, "***")
     if not quiet:
         print("$", shown)
-    _stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-    out = stdout.read().decode("utf-8", "replace")
-    err = stderr.read().decode("utf-8", "replace")
-    code = stdout.channel.recv_exit_status()
+    try:
+        _stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+        out = stdout.read().decode("utf-8", "replace")
+        err = stderr.read().decode("utf-8", "replace")
+        code = stdout.channel.recv_exit_status()
+    except (OSError, EOFError, paramiko.SSHException, TimeoutError) as e:
+        # Обрыв VPN mid-read — без traceback/socket spam в консоль suite
+        raise ConnectionError(f"SSH lost: {type(e).__name__}") from e
     if not quiet:
         if out:
             print(out, end="" if out.endswith("\n") else "\n")
         filtered = "\n".join(
-            line for line in err.splitlines() if "password" not in line.lower()
+            line
+            for line in err.splitlines()
+            if "password" not in line.lower()
+            and "socket exception" not in line.lower()
         )
         if filtered.strip():
             print("ERR:", filtered[:4000], file=sys.stderr)

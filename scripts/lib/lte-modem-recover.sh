@@ -12,6 +12,12 @@
 LTE_USB_GEN_FILE="${LTE_USB_GEN_FILE:-$REBOOT_STATE_DIR/usb.generation}"
 LTE_USB_PRESENT_FILE="${LTE_USB_PRESENT_FILE:-$NETLOG_STATE_DIR/usb.present}"
 LTE_USB_RESEAT_FLAG="${LTE_USB_RESEAT_FLAG:-$NETLOG_STATE_DIR/usb.reseat}"
+# Пока идёт наш USB reset — presence_tick не считает missing→present как «смена SIM»
+LTE_USB_RESET_HOLD_FILE="${LTE_USB_RESET_HOLD_FILE:-$NETLOG_STATE_DIR/usb.reset.hold}"
+# Момент, когда модем впервые пропал (для debounce ложного reseat при restart/CFUN)
+LTE_USB_MISSING_SINCE_FILE="${LTE_USB_MISSING_SINCE_FILE:-$NETLOG_STATE_DIR/usb.missing_since}"
+# Сколько секунд «нет модема» считать реальным извлечением USB/SIM
+LTE_USB_RESEAT_MIN_MISSING_SEC="${LTE_USB_RESEAT_MIN_MISSING_SEC:-12}"
 LTE_RECOVER_STAGE_FILE="${LTE_RECOVER_STAGE_FILE:-$NETLOG_STATE_DIR/lte.recover.stage}"
 LTE_RECOVER_STAGE_FAILS_FILE="${LTE_RECOVER_STAGE_FAILS_FILE:-$NETLOG_STATE_DIR/lte.recover.stage_fails}"
 LTE_APN_WIDE_FILE="${LTE_APN_WIDE_FILE:-$NETLOG_STATE_DIR/lte.apn.wide}"
@@ -123,35 +129,59 @@ lte_recover_reset_progress() {
 }
 
 # Тик присутствия модема: missing→present = reseat (смена SIM / переподключение USB).
+# Краткий blip tty при systemctl restart / CFUN — не reseat (debounce).
 # echo reseat|stable|missing
 lte_usb_presence_tick() {
-  local now=0 prev=""
+  local now=0 prev="" since=0 age=0 min_miss
   lte_modem_present && now=1
   [[ -f "$LTE_USB_PRESENT_FILE" ]] && prev="$(tr -dc '01' <"$LTE_USB_PRESENT_FILE")"
   echo "$now" >"$LTE_USB_PRESENT_FILE"
+  min_miss="${LTE_USB_RESEAT_MIN_MISSING_SEC:-12}"
+  [[ "$min_miss" =~ ^[0-9]+$ ]] || min_miss=12
 
-  if [[ "$prev" == "1" && "$now" -eq 0 ]]; then
+  # Наш recovery USB reset — не wide/reseat
+  if [[ -f "$LTE_USB_RESET_HOLD_FILE" ]]; then
+    rm -f "$LTE_USB_MISSING_SINCE_FILE" 2>/dev/null || true
+    if [[ "$now" -eq 0 ]]; then
+      echo "missing"
+    else
+      echo "stable"
+    fi
+    return 0
+  fi
+
+  if [[ "$now" -eq 0 ]]; then
+    if [[ ! -f "$LTE_USB_MISSING_SINCE_FILE" ]]; then
+      date +%s >"$LTE_USB_MISSING_SINCE_FILE"
+    fi
     echo "missing"
     return 0
   fi
-  if [[ "$prev" == "0" && "$now" -eq 1 ]]; then
-    lte_usb_generation_bump >/dev/null
-    lte_apn_wide_set 1
-    lte_recover_stage_set 0
-    rm -f "$LTE_IMSI_CACHE" 2>/dev/null || true
-    touch "$LTE_USB_RESEAT_FLAG"
-    type netlog >/dev/null 2>&1 && netlog USB_RESEAT "USB-модем переподключён (возможна смена SIM)" \
-      generation="$(lte_usb_generation)" || true
-    echo "reseat"
-    return 0
-  fi
-  if [[ -z "$prev" && "$now" -eq 1 ]]; then
-    # первый тик после старта сервиса — не reseat
+
+  # Модем снова есть
+  if [[ -f "$LTE_USB_MISSING_SINCE_FILE" ]]; then
+    since="$(tr -dc '0-9' <"$LTE_USB_MISSING_SINCE_FILE")"
+    [[ -n "$since" ]] || since=0
+    age=$(( $(date +%s) - since ))
+    rm -f "$LTE_USB_MISSING_SINCE_FILE" 2>/dev/null || true
+    if [[ "$since" -gt 0 && "$age" -ge "$min_miss" ]]; then
+      lte_usb_generation_bump >/dev/null
+      lte_apn_wide_set 1
+      lte_recover_stage_set 0
+      rm -f "$LTE_IMSI_CACHE" 2>/dev/null || true
+      touch "$LTE_USB_RESEAT_FLAG"
+      type netlog >/dev/null 2>&1 && netlog USB_RESEAT "USB-модем переподключён (возможна смена SIM)" \
+        generation="$(lte_usb_generation)" missing_sec="$age" || true
+      echo "reseat"
+      return 0
+    fi
+    # короткий blip — игнор
     echo "stable"
     return 0
   fi
-  if [[ "$now" -eq 0 ]]; then
-    echo "missing"
+
+  if [[ -z "$prev" ]]; then
+    echo "stable"
     return 0
   fi
   echo "stable"
@@ -172,6 +202,7 @@ lte_wait_modem() {
 # AT+CFUN bounce на AT-порту (radio soft-reset)
 lte_modem_cfun_bounce() {
   local dev="" ok=0
+  touch "$LTE_USB_RESET_HOLD_FILE"
   while read -r dev; do
     [[ -e "$dev" ]] || continue
     if /usr/sbin/chat -t 8 \
@@ -192,16 +223,20 @@ lte_modem_cfun_bounce() {
     fi
   done < <(lte_modem_at_candidates)
   if [[ "$ok" -eq 0 ]]; then
+    rm -f "$LTE_USB_RESET_HOLD_FILE" 2>/dev/null || true
     type netlog >/dev/null 2>&1 && netlog LTE_CFUN_FAIL "CFUN bounce не удался" || true
     return 1
   fi
   sleep "${LTE_CFUN_UP_SEC:-5}"
+  echo 1 >"$LTE_USB_PRESENT_FILE"
+  rm -f "$LTE_USB_MISSING_SINCE_FILE" "$LTE_USB_RESET_HOLD_FILE" 2>/dev/null || true
   return 0
 }
 
 # Сброс USB-устройства (ближе к power-cycle порта, чем reboot ОС)
 lte_modem_usb_reset() {
   local sys path busdev ok=0
+  touch "$LTE_USB_RESET_HOLD_FILE"
   sys="$(lte_modem_usb_sysfs 2>/dev/null || true)"
   if [[ -n "$sys" && -e "$sys/authorized" ]]; then
     type netlog >/dev/null 2>&1 && netlog LTE_USB_RESET "USB authorized 0→1" path="$sys" || true
@@ -245,10 +280,14 @@ PY
   fi
 
   if [[ "$ok" -eq 0 ]]; then
+    rm -f "$LTE_USB_RESET_HOLD_FILE" 2>/dev/null || true
     type netlog >/dev/null 2>&1 && netlog LTE_USB_RESET_FAIL "USB reset не выполнен" || true
     return 1
   fi
   sleep "${LTE_USB_RESET_UP_SEC:-3}"
+  # Не оставляем ложный reseat/wide от нашего reset
+  echo 1 >"$LTE_USB_PRESENT_FILE"
+  rm -f "$LTE_USB_RESEAT_FLAG" "$LTE_USB_RESET_HOLD_FILE" 2>/dev/null || true
   return 0
 }
 

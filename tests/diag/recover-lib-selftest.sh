@@ -47,10 +47,24 @@ PRESENT_FLAG=1
 r1="$(lte_usb_presence_tick)"
 check "first tick stable" '[[ "$r1" == "stable" ]]'
 
+# Короткий blip (restart/CFUN) — не reseat
+PRESENT_FLAG=0
+r_blip_m="$(lte_usb_presence_tick)"
+check "blip missing" '[[ "$r_blip_m" == "missing" ]]'
+PRESENT_FLAG=1
+r_blip_b="$(lte_usb_presence_tick)"
+check "blip back stable" '[[ "$r_blip_b" == "stable" ]]'
+check "blip no wide" '! lte_apn_wide_get'
+check "blip no reseat flag" '[[ ! -f "$LTE_USB_RESEAT_FLAG" ]]'
+check "blip gen still 0" '[[ "$(lte_usb_generation)" == "0" ]]'
+
+# Долгое отсутствие (≥ debounce) → reseat
+export LTE_USB_RESEAT_MIN_MISSING_SEC=2
 PRESENT_FLAG=0
 r2="$(lte_usb_presence_tick)"
 check "unplug missing" '[[ "$r2" == "missing" ]]'
-
+# missing_since уже записан тиком; сдвинем в прошлое, чтобы не ждать 2с в CI
+[[ -f "$LTE_USB_MISSING_SINCE_FILE" ]] && echo $(( $(date +%s) - 5 )) >"$LTE_USB_MISSING_SINCE_FILE"
 PRESENT_FLAG=1
 r3="$(lte_usb_presence_tick)"
 check "replug reseat" '[[ "$r3" == "reseat" ]]'

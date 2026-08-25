@@ -45,6 +45,15 @@ test_env_begin "$TESTS_ROOT/fixtures/fast-failover.env" \
   "LTE_RESTART_COOLDOWN=20" \
   "CHECK_INTERVAL=3" \
   "FAIL_THRESHOLD=2"
+# Cooldown: без next_ts первый apn_next всегда разрешён. Wide/reseat обходят cooldown.
+mkdir -p /run/systema-router
+APN_LAST="${APN_LAST_FILE:-$SYSTEMA_ROUTER_ROOT/state/apn.last}"
+if [[ ! -s "$APN_LAST" ]]; then
+  echo "internet" >"$APN_LAST"
+fi
+date +%s >/run/systema-router/lte.apn.next_ts
+rm -f /run/systema-router/lte.apn.wide /run/systema-router/usb.reseat \
+  /run/systema-router/usb.reset.hold /run/systema-router/usb.missing_since 2>/dev/null || true
 sleep 2
 
 # Уводим на LTE, чтобы recovery реально крутился
@@ -79,17 +88,36 @@ fi
 echo ">>> DROP icmp on $LTE_IF"
 iptables -I OUTPUT -o "$LTE_IF" -p icmp -j DROP
 iptables -I INPUT -i "$LTE_IF" -p icmp -j DROP
-netlog TEST_HOLD "ICMP DROP на LTE для recover-ladder" iface="$LTE_IF"
+# Ещё раз узкий режим прямо перед soft-fail (после ожидания LTE мог появиться wide)
+date +%s >/run/systema-router/lte.apn.next_ts
+rm -f /run/systema-router/lte.apn.wide /run/systema-router/usb.reseat \
+  /run/systema-router/usb.reset.hold /run/systema-router/usb.missing_since 2>/dev/null || true
+OBS_TOKEN="LADDER_OBS_$$_$RANDOM"
+netlog TEST_HOLD "ICMP DROP на LTE для recover-ladder" iface="$LTE_IF" token="$OBS_TOKEN"
 
 FAILOVER_LOG="${LOG_FILE:-$SYSTEMA_ROUTER_ROOT/lte-failover.log}"
+NETLOG="${NETLOG_FILE:-$SYSTEMA_ROUTER_ROOT/logs.log}"
+echo "$(date -Iseconds 2>/dev/null || date) $OBS_TOKEN" >>"$FAILOVER_LOG" 2>/dev/null || true
+
+# Только строки ПОСЛЕ маркера этого прогона (иначе ловим apn_next из прошлых тестов)
+after_mark() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  awk -v tok="$OBS_TOKEN" 'found { print; next } index($0, tok) { found=1 }' "$file" 2>/dev/null || true
+}
+
 deadline=$(( $(date +%s) + OBSERVE_SEC ))
 while (( $(date +%s) < deadline )); do
-  tail="$(log_tail 120 'LTE_RESTART')"
-  flog="$(tail -n 80 "$FAILOVER_LOG" 2>/dev/null || true)"
-  echo "$tail$flog" | grep -q 'ppp_keep_apn' && saw_ppp=1
-  echo "$tail$flog" | grep -q 'cfun_keep_apn' && saw_cfun=1
-  echo "$tail$flog" | grep -q 'usb_reset_keep_apn' && saw_usb=1
-  echo "$tail$flog" | grep -Eq 'reason=apn_next|soft_fail_apn_next|apn_next\)' && saw_apn=1
+  slice="$(after_mark "$NETLOG")"
+  echo "$slice" | grep 'LTE_RESTART' | grep -q 'reason=apn_next' && saw_apn=1
+  echo "$slice" | grep -q 'ppp_keep_apn' && saw_ppp=1
+  echo "$slice" | grep -q 'cfun_keep_apn' && saw_cfun=1
+  echo "$slice" | grep -q 'usb_reset_keep_apn' && saw_usb=1
+  flog="$(after_mark "$FAILOVER_LOG")"
+  echo "$flog" | grep -q 'ppp_keep_apn' && saw_ppp=1
+  echo "$flog" | grep -q 'cfun_keep_apn' && saw_cfun=1
+  echo "$flog" | grep -q 'usb_reset_keep_apn' && saw_usb=1
+  echo "$flog" | grep -E 'Перезапуск LTE \(apn_next\)' >/dev/null && saw_apn=1
   sleep 5
 done
 

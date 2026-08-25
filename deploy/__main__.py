@@ -69,10 +69,18 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
-            return with_test_log(lambda: run_all(parse_duration(rest[1])))
+            try:
+                return with_test_log(lambda: run_all(parse_duration(rest[1])))
+            except KeyboardInterrupt:
+                print("\nsuite interrupted", flush=True)
+                return 130
         from .tests import run_one_scenario
 
-        return with_test_log(lambda: run_one_scenario(rest))
+        try:
+            return with_test_log(lambda: run_one_scenario(rest))
+        except KeyboardInterrupt:
+            print("\ntest interrupted", flush=True)
+            return 130
 
     print(f"unknown command: {cmd}", file=sys.stderr)
     _usage()
