@@ -34,6 +34,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "===== LTE-RECOVER-LADDER START $(ts) observe=${OBSERVE_SEC}s ====="
+require_uplinks lte
 netlog TEST_START "Сценарий lte-recover-ladder" observe_s="$OBSERVE_SEC"
 
 test_env_begin "$TESTS_ROOT/fixtures/fast-failover.env" \

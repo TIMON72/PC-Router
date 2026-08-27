@@ -27,6 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "===== LTE-SOFT-FAIL START $(ts) observe=${OBSERVE_SEC}s ====="
+require_uplinks lte
 netlog TEST_START "Сценарий lte-soft-fail" observe_s="$OBSERVE_SEC"
 
 if ! ip -4 addr show "$LTE_IF" 2>/dev/null | grep -q inet; then

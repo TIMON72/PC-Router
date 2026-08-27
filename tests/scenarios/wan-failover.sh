@@ -29,6 +29,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "===== WAN-FAILOVER START $(ts) deadline=${DEADLINE_SEC}s dwell=${LTE_DWELL_SEC}s ====="
+require_uplinks wan lte
 netlog TEST_START "Сценарий wan-failover" deadline_s="$DEADLINE_SEC" dwell_s="$LTE_DWELL_SEC"
 test_env_begin "$TESTS_ROOT/fixtures/fast-failover.env"
 systemctl start "$LTE_UNIT" || true
@@ -48,6 +49,7 @@ netlog TEST_HOLD "WAN удержан down" max_s="$DEADLINE_SEC"
 
 deadline_ts=$(( $(date +%s) + DEADLINE_SEC ))
 while (( $(date +%s) < deadline_ts )); do
+  assert_uplinks_still lte
   if on_lte_path && ping -I "$LTE_IF" -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
     ok_lte=1
     echo ">>> LTE path OK"
@@ -75,6 +77,7 @@ echo ">>> restore WAN"
 restore_wan
 recover_deadline=$(( $(date +%s) + 90 ))
 while (( $(date +%s) < recover_deadline )); do
+  # WAN намеренно поднимается — assert_uplinks_still wan здесь даёт ложный FAIL
   if on_wan_path && ping -I "$WAN_IF" -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
     ok_wan=1
     echo ">>> WAN path OK"

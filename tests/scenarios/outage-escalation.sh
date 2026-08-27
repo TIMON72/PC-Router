@@ -38,6 +38,15 @@ cleanup() {
 trap cleanup EXIT
 
 echo "===== OUTAGE-DRY START $(ts) max_wait=${MAX_WAIT}s ====="
+# Нужен хотя бы один uplink, иначе эскалация бессмысленна / непредсказуема
+if wan_phys_ok; then
+  :
+elif lte_hw_ok; then
+  :
+else
+  skip_test "no WAN and no LTE for outage-dry"
+fi
+netlog TEST_START "Сценарий outage-dry" max_wait_s="$MAX_WAIT"
 netlog TEST_START "Сценарий outage-escalation DRY" max_wait_s="$MAX_WAIT"
 
 [[ -f "$OUTAGE_FILE" ]] && cp -a "$OUTAGE_FILE" "$OUTAGE_BAK" || rm -f "$OUTAGE_BAK"

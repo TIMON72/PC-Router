@@ -43,6 +43,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "===== LTE-APN-FIRSTBOOT START $(ts) ====="
+require_uplinks lte
+netlog TEST_START "Сценарий lte-apn-firstboot" observe_s="$OBSERVE_SEC"
 netlog TEST_START "Сценарий lte-apn-firstboot" observe_s="$OBSERVE_SEC"
 
 mkdir -p /run/systema-router
