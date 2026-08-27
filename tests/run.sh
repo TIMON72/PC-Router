@@ -10,9 +10,16 @@ Usage: sudo bash tests/run.sh <command> [args...]
 Commands:
   list                 — список сценариев
   snap [label]         — диагностика (snapshot)
+  status [days]        — сервисный отчёт (интерфейсы, обрывы за N дней; по умолчанию 1)
+  dhcp|dhcp-lan        — dnsmasq жив + число LAN-клиентов
   events [N] [filter]  — хвост журнала
+  boot-timeline [N]    — хвост state/boot-timeline.log
   recover-selftest     — unit-check lib recovery (без железа)
   wan-failover [deadline] [dwell]
+  vpn-lte-boot [deadline]
+  reboot-wan [observe] — реальный reboot, только WAN (+VPN)
+  reboot-lte [observe]  — реальный reboot, только LTE (+VPN)
+  reboot-both [observe]— реальный reboot, WAN+LTE (приоритет WAN)
   lte-soft-fail [observe_sec]
   lte-recover-ladder [observe_sec]
   lte-apn-firstboot [observe_sec]
@@ -37,6 +44,15 @@ case "$cmd" in
   snap|snapshot)
     bash "$TESTS_ROOT/diag/snapshot.sh" "$@"
     ;;
+  status|health|service)
+    bash "$TESTS_ROOT/diag/status.sh" "$@"
+    ;;
+  dhcp|dhcp-lan|lan-dhcp)
+    bash "$TESTS_ROOT/diag/dhcp-lan.sh" "$@"
+    ;;
+  boot-timeline|timeline)
+    bash "$TESTS_ROOT/diag/boot-timeline.sh" "$@"
+    ;;
   events|log)
     bash "$TESTS_ROOT/diag/recent-events.sh" "$@"
     ;;
@@ -45,6 +61,18 @@ case "$cmd" in
     ;;
   wan-failover|wan)
     bash "$TESTS_ROOT/scenarios/wan-failover.sh" "$@"
+    ;;
+  vpn-lte-boot|vpn-boot)
+    bash "$TESTS_ROOT/scenarios/vpn-lte-boot.sh" "$@"
+    ;;
+  reboot-wan)
+    bash "$TESTS_ROOT/scenarios/reboot-wan.sh" "$@"
+    ;;
+  reboot-lte)
+    bash "$TESTS_ROOT/scenarios/reboot-lte.sh" "$@"
+    ;;
+  reboot-both)
+    bash "$TESTS_ROOT/scenarios/reboot-both.sh" "$@"
     ;;
   lte-soft-fail|lte-soft)
     bash "$TESTS_ROOT/scenarios/lte-soft-fail.sh" "$@"
