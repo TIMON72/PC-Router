@@ -27,6 +27,20 @@ echo "=== services ==="
 case "$EDGE_MODE" in
   vpn)
     systemctl is-active dnsmasq lte lte-failover "$OPENVPN_UNIT" 2>/dev/null || true
+    vpn_en="$(systemctl is-enabled "$OPENVPN_UNIT" 2>/dev/null || echo unknown)"
+    base_en="$(systemctl is-enabled openvpn.service 2>/dev/null || echo unknown)"
+    echo "openvpn instance: $vpn_en  openvpn.service: $base_en"
+    if [[ "$vpn_en" != "enabled" ]]; then
+      profile="${OPENVPN_UNIT#*@}"
+      profile="${profile%.service}"
+      autostart="$(grep -E '^AUTOSTART=' /etc/default/openvpn 2>/dev/null | sed -n 's/^AUTOSTART=//p' | tr -d '\"' || true)"
+      if [[ "$vpn_en" == "enabled-runtime" && "$base_en" == "enabled" \
+        && { [[ "$autostart" == "all" ]] || [[ "$autostart" == "$profile" ]] || [[ " $autostart " == *" $profile "* ]]; } ]]; then
+        echo "OK: autostart через openvpn.service (AUTOSTART=$autostart)"
+      else
+        echo "WARN: нет постоянного autostart — sudo systemctl enable $OPENVPN_UNIT"
+      fi
+    fi
     ;;
   *)
     systemctl is-active dnsmasq lte lte-failover 2>/dev/null || true

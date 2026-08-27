@@ -197,6 +197,15 @@ rm -f /usr/local/sbin/lte-apn-select.sh /usr/local/sbin/apply-nat-rules.sh \
 
 systemctl daemon-reload
 systemctl enable lte.service lte-failover.service network-failsafe.timer dnsmasq.service
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/lib/load-config.sh"
+if [[ "${EDGE_MODE:-vpn}" == "vpn" ]]; then
+  OPENVPN_UNIT="${OPENVPN_UNIT:-openvpn@vpn.service}"
+  # Instance openvpn@vpn не фигурирует в list-unit-files (только шаблон openvpn@.service).
+  systemctl enable "$OPENVPN_UNIT" 2>/dev/null || true
+  # Debian/Ubuntu: AUTOSTART профилей из /etc/default/openvpn
+  systemctl enable openvpn.service 2>/dev/null || true
+fi
 systemctl restart lte-failover.service
 systemctl restart dnsmasq.service || systemctl start dnsmasq.service || true
 systemctl start network-failsafe.timer

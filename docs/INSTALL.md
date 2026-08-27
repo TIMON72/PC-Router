@@ -229,6 +229,8 @@ sudo bash scripts/upgrade-failover.sh
 
 С рабочей станции (модуль `deploy/`; `config.env` площадки на устройстве не перезаписывается):
 
+`upgrade-failover.sh` при `EDGE_MODE=vpn` делает постоянный `systemctl enable openvpn@vpn` (не только runtime).
+
 ```powershell
 copy deploy\config.env.example deploy\config.env
 # указать PASS в секции целевого устройства

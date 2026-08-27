@@ -191,6 +191,23 @@ elif (( reboot_ev == 0 && boots_in_window <= 0 )); then
 fi
 echo
 
+_openvpn_enable_label() {
+  local en base profile autostart
+  en="$(systemctl is-enabled "$OPENVPN_UNIT" 2>/dev/null || echo unknown)"
+  [[ "$en" == "enabled" ]] && { echo "enabled"; return; }
+  base="$(systemctl is-enabled openvpn.service 2>/dev/null || echo -)"
+  profile="${OPENVPN_UNIT#*@}"
+  profile="${profile%.service}"
+  autostart="$(grep -E '^AUTOSTART=' /etc/default/openvpn 2>/dev/null | sed -n 's/^AUTOSTART=//p' | tr -d '\"' || true)"
+  if [[ "$en" == "enabled-runtime" && "$base" == "enabled" ]]; then
+    if [[ "$autostart" == "all" || "$autostart" == "$profile" || " $autostart " == *" $profile "* ]]; then
+      echo "enabled (openvpn.service + AUTOSTART)"
+      return
+    fi
+  fi
+  echo "$en"
+}
+
 # --- services ---
 echo "=== services ==="
 _svc() {
@@ -205,7 +222,10 @@ _svc dnsmasq.service
 _svc "$LTE_UNIT"
 _svc lte-failover.service
 _svc network-failsafe.timer
-[[ "$EDGE_MODE" == "vpn" ]] && _svc "$OPENVPN_UNIT"
+if [[ "$EDGE_MODE" == "vpn" ]]; then
+  st="$(systemctl is-active "$OPENVPN_UNIT" 2>/dev/null || echo missing)"
+  printf '  %-28s %-10s enabled=%s\n' "$OPENVPN_UNIT" "$st" "$(_openvpn_enable_label)"
+fi
 echo
 
 # --- DHCP / LAN clients ---
