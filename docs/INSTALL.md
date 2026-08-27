@@ -103,7 +103,8 @@ network:
 sudo netplan apply
 ```
 
-`upgrade-failover.sh` может добавить `optional` / `ignore-carrier` для LAN, если их ещё нет.
+В примере выше для WAN тоже желателен `optional: true` (cold boot без кабеля WAN / только LTE).  
+`upgrade-failover.sh` гарантирует `optional: true` для WAN и `optional` / `ignore-carrier` для LAN.
 
 ---
 
@@ -284,7 +285,8 @@ sudo bash /home/admin/PC-Router/tests/run.sh outage-dry
 
 ```powershell
 python -m deploy pc-62 test --all 1h
-python -m deploy pc-62 test snap
+python -m deploy pc-62 status
+python -m deploy pc-62 diag snap
 ```
 
 Журнал удалённых прогонов: `tests/tests.log`.
