@@ -33,6 +33,14 @@ netlog() {
     # CSV-friendly: timestamp|event|message|k=v...
     printf '%s|%s|%s|%s\n' "$ts" "$event" "$msg" "${extras# }" >>"$NETLOG_FILE" 2>/dev/null || true
     logger -t systema-router -p local0.info -- "${event}: ${msg}${extras}" 2>/dev/null || true
+    # Persistent boot/path trail (survives volatile journal after hard power-off)
+    case "$event" in
+      FAILOVER_START|LTE_IPUP|VPN_RESTART|PATH_SWITCH|WAN_UP|WAN_DOWN|LTE_UP|LTE_DOWN|VPN_UP|VPN_DOWN|REBOOT_TEST_ARM|REBOOT_TEST_VERIFY|REBOOT_TEST_PASS|REBOOT_TEST_FAIL)
+        local timeline="${REBOOT_STATE_DIR:-${SYSTEMA_ROUTER_ROOT:-/home/admin/PC-Router}/state}/boot-timeline.log"
+        mkdir -p "$(dirname "$timeline")" 2>/dev/null || true
+        printf '%s|%s|%s|%s\n' "$ts" "$event" "$msg" "${extras# }" >>"$timeline" 2>/dev/null || true
+        ;;
+    esac
 }
 
 # Логировать только при смене состояния (edge-trigger)

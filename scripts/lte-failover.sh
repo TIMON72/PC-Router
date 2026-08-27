@@ -642,6 +642,10 @@ while true; do
             # Kernel уже снял WAN default (carrier loss) — синхронизируем path/метрики
             set_lte_route
         fi
+        # Cold boot / залипший VPN: LTE только что стал OK, а edge ещё нет
+        if [[ $lte_ok_streak -eq 1 ]] && ! edge_ready; then
+            force_restart_edge "lte_became_ready"
+        fi
         maybe_restart_edge
     else
         # Оба uplink плохие

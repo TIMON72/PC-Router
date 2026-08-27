@@ -129,26 +129,44 @@ touch "$PROJECT_DIR/logs.log" "$PROJECT_DIR/lte-failover.log"
 chmod 644 "$PROJECT_DIR/logs.log" "$PROJECT_DIR/lte-failover.log"
 chown admin:admin "$PROJECT_DIR/logs.log" "$PROJECT_DIR/lte-failover.log" "$PROJECT_DIR/state" 2>/dev/null || true
 
-# netplan ignore-carrier для LAN
+# netplan: WAN optional (cold boot без кабеля) + LAN ignore-carrier
+WAN_IF_NP="$(grep -E '^WAN_IF=' "$CFG" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\"' || true)"
+WAN_IF_NP="${WAN_IF_NP:-enp3s0}"
+LAN_IF_NP="$(grep -E '^LAN_IF=' "$CFG" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\"' || true)"
+LAN_IF_NP="${LAN_IF_NP:-enp4s0}"
 for f in /etc/netplan/*.yaml; do
   [[ -f "$f" ]] || continue
-  if grep -q 'enp4s0:' "$f" && ! grep -q 'ignore-carrier:' "$f"; then
-    python3 - <<'PY' "$f" 2>/dev/null || true
+  python3 - "$f" "$WAN_IF_NP" "$LAN_IF_NP" <<'PY' 2>/dev/null || true
 import sys, re
-path = sys.argv[1]
+path, wan_if, lan_if = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path, encoding="utf-8").read()
-if "ignore-carrier" in text:
-    raise SystemExit
-text2 = re.sub(
-    r"(enp4s0:\n(?:[ \t]+.+\n)*)",
-    lambda m: m.group(1) if "ignore-carrier" in m.group(1) else m.group(1).rstrip("\n") + "\n      optional: true\n      ignore-carrier: true\n",
-    text,
-    count=1,
-)
-if text2 != text:
-    open(path, "w", encoding="utf-8").write(text2)
+orig = text
+
+def ensure_optional(iface: str, body: str) -> str:
+    m = re.search(rf"({re.escape(iface)}:\n(?:[ \t]+.+\n)*)", body)
+    if not m:
+        return body
+    block = m.group(1)
+    if re.search(r"^[ \t]+optional:\s*true\s*$", block, re.M):
+        return body
+    block2 = block.rstrip("\n") + "\n      optional: true\n"
+    return body[: m.start(1)] + block2 + body[m.end(1) :]
+
+def ensure_lan_ignore(iface: str, body: str) -> str:
+    m = re.search(rf"({re.escape(iface)}:\n(?:[ \t]+.+\n)*)", body)
+    if not m:
+        return body
+    block = m.group(1)
+    if "ignore-carrier:" in block:
+        return body
+    block2 = block.rstrip("\n") + "\n      optional: true\n      ignore-carrier: true\n"
+    return body[: m.start(1)] + block2 + body[m.end(1) :]
+
+text = ensure_optional(wan_if, text)
+text = ensure_lan_ignore(lan_if, text)
+if text != orig:
+    open(path, "w", encoding="utf-8").write(text)
 PY
-  fi
 done
 
 find "$PROJECT_DIR" /etc/ppp/ip-up.d/systema-router \
