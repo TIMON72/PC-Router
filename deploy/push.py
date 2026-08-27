@@ -1,15 +1,67 @@
 """Upload local project to ACTIVE device and run upgrade-failover.sh."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+from .paths import app_dir, cli_name
 from .remote import connect, project_root, remote_root, run, upload_tree
 
 # Never push site/secrets configs onto the device from the PC tree.
 _SKIP_NAMES = {"config.env"}
 _SKIP_REL_PREFIXES = ("deploy/config.env",)
 
+# PC-only / dev: не заливать на роутер (python -m deploy push).
+_SKIP_DIR_NAMES = frozenset({
+    ".git",
+    "__pycache__",
+    "tmp",
+    "build",
+    "deploy",
+    "dist",
+    "field-kit",
+    ".venv",
+    "venv",
+    ".cursor",
+    ".idea",
+    ".vscode",
+})
+
+# Если раньше залили целиком репо — убрать с устройства при push.
+_REMOTE_PRUNE_DIRS = ("build", "deploy", "dist", "field-kit", ".venv", "venv")
+
+
+def _push_skip_reason(rel: str, path: Path) -> str | None:
+    if any(part in _SKIP_DIR_NAMES for part in Path(rel).parts):
+        return "dev"
+    if path.name.startswith("."):
+        return "dot"
+    if path.name in _SKIP_NAMES or rel in _SKIP_REL_PREFIXES:
+        return "secret"
+    return None
+
+
+def _prune_remote_dev(client, root_remote: str) -> list[str]:
+    """Удалить PC-only каталоги, оставшиеся от старых push."""
+    quoted = " ".join(_REMOTE_PRUNE_DIRS)
+    cmd = (
+        f"bash -lc 'cd {root_remote} && for d in {quoted}; do "
+        f"if [[ -e \"$d\" ]]; then rm -rf \"$d\" && echo \"$d\"; fi; done'"
+    )
+    _, out, _ = run(client, cmd, use_sudo=True, timeout=60, quiet=True)
+    return [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+
 
 def push() -> int:
     root = project_root()
+    if not (root / "scripts" / "upgrade-failover.sh").is_file():
+        print(
+            f"push: no PC-Router tree (need scripts/upgrade-failover.sh).\n"
+            f"  Field kit: put full repo in {app_dir() / 'PC-Router'} or use "
+            f"{cli_name()} test … (tests already on device).",
+            file=sys.stderr,
+        )
+        return 2
     root_remote = remote_root()
     client = connect()
     sftp = client.open_sftp()
@@ -18,12 +70,8 @@ def push() -> int:
     for p in root.rglob("*"):
         if not p.is_file():
             continue
-        if ".git" in p.parts or "__pycache__" in p.parts or "tmp" in p.parts:
-            continue
-        if p.name.startswith("."):
-            continue
         rel = str(p.relative_to(root)).replace("\\", "/")
-        if p.name in _SKIP_NAMES or rel in _SKIP_REL_PREFIXES:
+        if _push_skip_reason(rel, p):
             skipped += 1
             continue
         rels.append(rel)
@@ -31,7 +79,11 @@ def push() -> int:
     print(f"upload → {root_remote} …", flush=True, end="")
     n = upload_tree(sftp, root, root_remote, rels, quiet=True)
     sftp.close()
-    print(f" {n} files (skip secrets={skipped})", flush=True)
+    print(f" {n} files (skipped local/dev={skipped})", flush=True)
+
+    pruned = _prune_remote_dev(client, root_remote)
+    if pruned:
+        print(f"prune remote dev: {' '.join(pruned)}", flush=True)
 
     print("normalize CRLF …", flush=True, end="")
     run(

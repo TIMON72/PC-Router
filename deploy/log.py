@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Callable
 
-from .remote import active_id, device_name, project_root
+from .paths import is_frozen, app_dir, workspace_dir
+from .remote import active_id, device_name
 
 
 class _Tee:
@@ -30,7 +31,10 @@ class _Tee:
 
 
 def test_log_path() -> Path:
-    path = project_root() / "tests" / "tests.log"
+    if is_frozen():
+        path = app_dir() / "tests.log"
+    else:
+        path = workspace_dir() / "tests" / "tests.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 

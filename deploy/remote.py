@@ -14,8 +14,10 @@ from pathlib import Path
 
 import paramiko  # type: ignore
 
+from .paths import config_hint, project_root as _project_root, resolve_config_path
+
 _DEPLOY_DIR = Path(__file__).resolve().parent
-_CONFIG = _DEPLOY_DIR / "config.env"
+_CONFIG = resolve_config_path()
 
 
 def quiet_paramiko() -> None:
@@ -59,11 +61,17 @@ def _parse_env_file(path: Path) -> tuple[dict[str, str], dict[str, dict[str, str
 
 
 def _load_raw() -> tuple[dict[str, str], dict[str, dict[str, str]]]:
-    g, sections = _parse_env_file(_CONFIG)
+    path = _CONFIG or resolve_config_path()
+    g, sections = _parse_env_file(path) if path else ({}, {})
     alt = os.environ.get("SYSTEMA_DEVICE_ENV", "") or os.environ.get(
         "DEPLOY_CONFIG", ""
     )
-    if alt:
+    if alt and path and Path(alt) != path:
+        g2, s2 = _parse_env_file(Path(alt))
+        g.update(g2)
+        for name, body in s2.items():
+            sections.setdefault(name, {}).update(body)
+    elif alt and not path:
         g2, s2 = _parse_env_file(Path(alt))
         g.update(g2)
         for name, body in s2.items():
@@ -106,7 +114,7 @@ def resolve_device(token: str) -> str:
         f"{sid}({body.get('DEVICE_NAME') or '-'})" for sid, body in _SECTIONS.items()
     )
     print(
-        f"Unknown device {token!r}. Known: {known or '(none in deploy/config.env)'}",
+        f"Unknown device {token!r}. Known: {known or f'(none; set {config_hint()})'}",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -166,14 +174,14 @@ def env_creds() -> tuple[str, str, str]:
     password = _cfg("PASS", "SYSTEMA_PASS", default="")
     if not host:
         print(
-            "Set HOST for ACTIVE in deploy/config.env (from config.env.example) or SYSTEMA_HOST",
+            f"Set HOST for ACTIVE in {config_hint()} or SYSTEMA_HOST",
             file=sys.stderr,
         )
         sys.exit(2)
     key = _cfg("SSH_KEY", "SYSTEMA_SSH_KEY", default="")
     if not password and not key:
         print(
-            "Set PASS for ACTIVE in deploy/config.env or SYSTEMA_PASS / SYSTEMA_SSH_KEY",
+            f"Set PASS for ACTIVE in {config_hint()} or SYSTEMA_PASS / SYSTEMA_SSH_KEY",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -349,4 +357,4 @@ def upload_tree(
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return _project_root()
