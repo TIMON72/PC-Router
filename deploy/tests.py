@@ -18,10 +18,11 @@ from pathlib import Path
 import paramiko  # type: ignore
 
 from . import remote
+from .paths import workspace_dir
 from .remote import connect, env_creds, quiet_paramiko, reconnect_with_retry, run
 
 TZ = timezone(timedelta(hours=7))
-MIN_DURATION_SEC = 300
+MIN_DURATION_SEC = 3600
 
 # Ctrl+C: сначала дождаться конца текущего сценария, повторный — оборвать SSH.
 _stop_after_current = False
@@ -51,8 +52,6 @@ def _on_sigint(_signum: int, _frame: object) -> None:
     )
 
 DURATION_PRESETS: dict[str, int] = {
-    "300": 300,
-    "5m": 300,
     "3600": 3600,
     "1h": 3600,
     "7200": 7200,
@@ -70,14 +69,38 @@ DURATION_PRESETS: dict[str, int] = {
     "1d": 86400,
 }
 
-# (name, run.sh args with {observe}/{dwell}, defaults)
+# Порядок = группы uplink (см. _UPLINK_META). Внутри группы — по возрастанию риска/времени.
 _SUITE: list[tuple[str, list[str], dict[str, int]]] = [
     ("recover-selftest", ["recover-selftest"], {"timeout": 120}),
+    ("dhcp-lan", ["dhcp-lan"], {"timeout": 60}),
     ("outage-dry", ["outage-dry", "{observe}"], {"observe": 120, "timeout_pad": 360}),
+    # WAN+LTE — оба подключены, не выдергивать
     (
         "wan-failover",
         ["wan-failover", "{observe}", "{dwell}"],
         {"observe": 120, "dwell": 40, "timeout_pad": 280},
+    ),
+    (
+        "reboot-both",
+        ["reboot-both", "{observe}"],
+        {"observe": 180, "timeout_pad": 240},
+    ),
+    # WAN — LTE можно отключить
+    (
+        "reboot-wan",
+        ["reboot-wan", "{observe}"],
+        {"observe": 180, "timeout_pad": 240},
+    ),
+    # LTE — WAN не нужен (тест сам опустит или hold)
+    (
+        "vpn-lte-boot",
+        ["vpn-lte-boot", "{observe}"],
+        {"observe": 150, "timeout_pad": 300},
+    ),
+    (
+        "reboot-lte",
+        ["reboot-lte", "{observe}"],
+        {"observe": 180, "timeout_pad": 240},
     ),
     ("lte-soft-fail", ["lte-soft-fail", "{observe}"], {"observe": 120, "timeout_pad": 180}),
     (
@@ -92,13 +115,103 @@ _SUITE: list[tuple[str, list[str], dict[str, int]]] = [
     ),
 ]
 
-_SHORT = {"snap", "events", "list", "help", "recover-selftest", "recover-lib"}
+# Группа uplink для suite: label → подсказка оператору (можно ли выдернуть кабель).
+_UPLINK_META: dict[str, tuple[str, str]] = {
+    "recover-selftest": ("unit", "без uplink"),
+    "dhcp-lan": ("LAN", "без WAN/LTE; проверка DHCP на устройстве"),
+    "outage-dry": ("WAN|LTE", "нужен хотя бы один"),
+    "wan-failover": ("WAN+LTE", "оба подключены — не трогать"),
+    "reboot-both": ("WAN+LTE", "оба подключены — не трогать"),
+    "reboot-wan": ("WAN", "LTE можно отключить"),
+    "vpn-lte-boot": ("LTE", "WAN тест сам опустит"),
+    "reboot-lte": ("LTE", "WAN можно отключить"),
+    "lte-soft-fail": ("LTE", "WAN можно отключить"),
+    "lte-recover-ladder": ("LTE", "WAN можно отключить; USB reseat в тесте"),
+    "lte-apn-firstboot": ("LTE", "WAN можно отключить; USB reseat в тесте"),
+}
+
+_UPLINK_GROUP_ORDER = ("unit", "LAN", "WAN|LTE", "WAN+LTE", "WAN", "LTE")
+
+_GROUP_HINTS: dict[str, str] = {
+    "unit": "без uplink",
+    "LAN": "без WAN/LTE; DHCP на устройстве",
+    "WAN|LTE": "нужен хотя бы один",
+    "WAN+LTE": "оба подключены — не трогать",
+    "WAN": "LTE можно отключить",
+    "LTE": "WAN можно отключить",
+}
+
+
+def _uplink_group(name: str) -> str:
+    return _UPLINK_META.get(name, ("", ""))[0]
+
+
+def _uplink_hint(name: str) -> str:
+    group = _uplink_group(name)
+    if group in _GROUP_HINTS:
+        return _GROUP_HINTS[group]
+    return _UPLINK_META.get(name, ("", ""))[1]
+
+
+def _print_uplink_plan(scenario_names: list[str]) -> None:
+    grouped: dict[str, list[str]] = {}
+    for name in scenario_names:
+        label = _uplink_group(name) or "?"
+        grouped.setdefault(label, []).append(name)
+    print("uplink plan:", flush=True)
+    for label in _UPLINK_GROUP_ORDER:
+        names = grouped.get(label)
+        if not names:
+            continue
+        hint = _uplink_hint(names[0])
+        print(f"  {label:8}  {', '.join(names)}  ({hint})", flush=True)
+    for label, names in grouped.items():
+        if label in _UPLINK_GROUP_ORDER:
+            continue
+        print(f"  {label:8}  {', '.join(names)}", flush=True)
+
+
+def _maybe_print_uplink_group(name: str, prev_group: str) -> str:
+    group = _uplink_group(name)
+    if group == prev_group:
+        return prev_group
+    hint = _uplink_hint(name)
+    if group:
+        print(f"\n— {group} — {hint}", flush=True)
+    return group
+
+
+DIAG_COMMANDS = frozenset(
+    {
+        "snap",
+        "snapshot",
+        "events",
+        "log",
+        "recover-selftest",
+        "recover-lib",
+        "boot-timeline",
+        "timeline",
+        "dhcp",
+        "dhcp-lan",
+        "lan-dhcp",
+        "status",
+        "health",
+        "service",
+    }
+)
+
+_SHORT = DIAG_COMMANDS | {"list", "help"}
 _LONG = {
     "lte-recover-ladder",
     "lte-ladder",
     "recover-ladder",
     "lte-apn-firstboot",
     "apn-firstboot",
+    "vpn-lte-boot",
+    "vpn-boot",
+    "reboot-wan",
+    "reboot-lte",
+    "reboot-both",
 }
 
 
@@ -111,17 +224,30 @@ def parse_duration(token: str) -> int:
     elif m := re.fullmatch(r"(\d+)\s*s(ec(onds?)?)?", t):
         sec = int(m.group(1))
     elif m := re.fullmatch(r"(\d+)\s*m(in(utes?)?)?", t):
+        # Минутные пресеты для --all убраны (минимум 1h)
         sec = int(m.group(1)) * 60
     elif m := re.fullmatch(r"(\d+)\s*h(ours?)?", t):
         sec = int(m.group(1)) * 3600
     elif m := re.fullmatch(r"(\d+)\s*d(ays?)?", t):
         sec = int(m.group(1)) * 86400
     else:
-        known = ", ".join(sorted(DURATION_PRESETS, key=lambda k: DURATION_PRESETS[k]))
-        print(f"Bad duration {token!r}. Use seconds or presets: {known}", file=sys.stderr)
+        known = ", ".join(
+            sorted(
+                {k for k in DURATION_PRESETS if not k.isdigit()},
+                key=lambda k: DURATION_PRESETS[k],
+            )
+        )
+        print(
+            f"Bad duration {token!r}. Use presets: {known} (minimum 1h)",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
     if sec < MIN_DURATION_SEC:
-        print(f"Duration {sec}s < minimum {MIN_DURATION_SEC}s", file=sys.stderr)
+        print(
+            f"Duration {sec}s < minimum {MIN_DURATION_SEC}s (1h). "
+            f"Shorter --all budgets are not supported.",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
     return sec
 
@@ -173,7 +299,7 @@ def now_local() -> datetime:
 def report_paths() -> tuple[Path, str]:
     host, _, _ = env_creds()
     tag = remote.device_name() or host.replace(".", "-")
-    local = Path(__file__).resolve().parents[1] / "tmp" / f"suite-{tag}-report.json"
+    local = workspace_dir() / "tmp" / f"suite-{tag}-report.json"
     local.parent.mkdir(parents=True, exist_ok=True)
     return local, f"{remote.remote_root()}/tmp/suite-report.json"
 
@@ -240,10 +366,18 @@ def ensure_client(
 # Сценарии, которые рвут WAN/VPN — запускаем detached и ждём файл результата
 _DETACHED_SCENARIOS = {
     "wan-failover",
+    "vpn-lte-boot",
     "outage-dry",
     "lte-soft-fail",
     "lte-recover-ladder",
     "lte-apn-firstboot",
+}
+
+# Реальный systemctl reboot: результат в state/ (не /tmp — tmpfs стирается).
+_REBOOT_SCENARIOS = {
+    "reboot-wan",
+    "reboot-lte",
+    "reboot-both",
 }
 
 _HEALTH_CMD = (
@@ -252,10 +386,21 @@ _HEALTH_CMD = (
 )
 
 _CLEANUP_CMD = (
-    "bash -lc 'rm -f /tmp/hold-wan-down /run/systema-router/test.env; "
+    "bash -lc '"
+    "rm -f /tmp/hold-wan-down /run/systema-router/test.env; "
     "iptables -D OUTPUT -o ppp0 -p icmp -j DROP 2>/dev/null || true; "
     "iptables -D INPUT -i ppp0 -p icmp -j DROP 2>/dev/null || true; "
-    "ip link set enp3s0 up 2>/dev/null || true; networkctl up enp3s0 2>/dev/null || true'"
+    "ip link set enp3s0 up 2>/dev/null || true; networkctl up enp3s0 2>/dev/null || true; "
+    # хвосты reboot-test, если прошлый прогон оборвался
+    "systemctl disable --now pc-router-reboot-hold-wan.service "
+    "pc-router-reboot-verify.service 2>/dev/null || true; "
+    "rm -f /etc/systemd/system/pc-router-reboot-hold-wan.service "
+    "/etc/systemd/system/pc-router-reboot-verify.service "
+    "/usr/local/sbin/pc-router-reboot-hold-wan.sh "
+    "/usr/local/sbin/pc-router-reboot-verify.sh 2>/dev/null || true; "
+    "systemctl enable lte.service 2>/dev/null || true; "
+    "systemctl start lte.service 2>/dev/null || true"
+    "'"
 )
 
 
@@ -275,9 +420,200 @@ def health(client: paramiko.SSHClient) -> tuple[paramiko.SSHClient, str]:
 def _pass_note(text: str) -> str:
     for line in text.splitlines()[::-1]:
         s = line.strip()
-        if s.startswith("PASS") or s.startswith("FAIL") or s.startswith("WARN"):
+        if (
+            s.startswith("PASS")
+            or s.startswith("FAIL")
+            or s.startswith("SKIP")
+            or s.startswith("WARN")
+        ):
             return s[:200]
     return ""
+
+
+def _status_from_code(code: int, text: str = "") -> str:
+    """Map remote exit code → suite status. 77 = SKIP."""
+    if code == 77:
+        return "SKIP"
+    note = _pass_note(text)
+    if code == 0 and note.startswith("SKIP"):
+        return "SKIP"
+    if code == 0:
+        return "PASS"
+    return "FAIL"
+
+
+def _run_reboot(
+    client: paramiko.SSHClient,
+    args: list[str],
+    timeout: int,
+) -> tuple[paramiko.SSHClient, int, str, str]:
+    """Arm + systemctl reboot; тихо ждём state/reboot-test.result.
+
+    Ожидаемый обрыв SSH при reboot не логируем. Шум — только если устройство
+    не вернулось за timeout (или verify FAIL).
+    """
+    global _active_client
+    root = remote.remote_root()
+    result_f = f"{root}/state/reboot-test.result"
+    out_f = f"{root}/state/reboot-test.out"
+    pending_f = f"{root}/state/reboot-test.pending"
+    quoted = " ".join(args)
+
+    prev_hook = remote.before_reconnect_log
+    remote.before_reconnect_log = None  # не ломать строку прогресса suite
+
+    def _short_note(raw: str, code: int) -> str:
+        note = _pass_note(raw)
+        if note:
+            return note
+        return "PASS" if code == 0 else "FAIL"
+
+    try:
+        _ = run(
+            client,
+            f"bash -lc 'rm -f {result_f} {out_f} {pending_f}'",
+            use_sudo=True,
+            timeout=30,
+            quiet=True,
+        )
+
+        try:
+            _active_client = client
+            rc, out, err = run(
+                client,
+                f"bash {root}/tests/run.sh {quoted}",
+                use_sudo=True,
+                timeout=120,
+                quiet=True,
+            )
+            # Скрипт вернулся БЕЗ обрыва SSH → реального reboot не было
+            text = f"{out or ''}\n{err or ''}".strip()
+            _, raw, _ = run(
+                client,
+                f"bash -lc 'cat {out_f} 2>/dev/null; "
+                f"test -f {result_f} && echo RESULT:$(cat {result_f})'",
+                use_sudo=True,
+                timeout=30,
+                quiet=True,
+            )
+            combined = f"{text}\n{raw or ''}".strip()
+
+            if "SKIP" in combined or rc == 77:
+                return client, 77, _pass_note(combined) or "SKIP", ""
+
+            if "RESULT:" in (raw or ""):
+                try:
+                    rcode = int(
+                        (raw or "").strip().split("RESULT:")[-1].strip().split()[0]
+                    )
+                except ValueError:
+                    rcode = 1
+                if rcode == 0:
+                    # result=0 без reboot — подозрительно
+                    return (
+                        client,
+                        1,
+                        combined,
+                        "reboot-test.result=0 but SSH never dropped",
+                    )
+                return client, rcode, combined, ""
+
+            # Unknown command / FAIL / early exit — никогда не PASS
+            fail_code = rc if rc not in (0, None) else 1
+            note = _pass_note(combined) or (
+                "reboot did not run (no SSH drop)"
+                if fail_code
+                else "unexpected exit 0 without reboot"
+            )
+            if fail_code == 0:
+                fail_code = 1
+                note = "reboot did not run (script returned without disconnect)"
+            return client, fail_code, combined or note, note
+        except (OSError, TimeoutError, paramiko.SSHException, EOFError, ConnectionError):
+            # Ожидаемо: reboot оборвал SSH — молча ждём возврат
+            try:
+                client.close()
+            except Exception:
+                pass
+
+        deadline = time.time() + timeout + 90
+        code = -1
+        out = ""
+        err = ""
+        while time.time() < deadline:
+            if _force_stop:
+                err = "aborted"
+                break
+            left = deadline - time.time()
+            if left <= 0:
+                break
+            try:
+                client = reconnect_with_retry(
+                    deadline_sec=min(90.0, max(10.0, left)),
+                    connect_timeout=15.0,
+                    retry_pause_sec=8.0,
+                )
+                _active_client = client
+                _, probe, _ = run(
+                    client,
+                    f"bash -lc 'if test -f {result_f}; then echo DONE; cat {result_f}; "
+                    f"elif test -f {pending_f}; then echo PENDING; "
+                    f"else echo WAIT; fi'",
+                    use_sudo=True,
+                    timeout=30,
+                    quiet=True,
+                )
+                lines = [ln.strip() for ln in probe.splitlines() if ln.strip()]
+                if not lines:
+                    time.sleep(5)
+                    continue
+                if lines[0] == "DONE":
+                    try:
+                        code = int(lines[1]) if len(lines) > 1 else 1
+                    except ValueError:
+                        code = 1
+                    _, raw, _ = run(
+                        client,
+                        f"bash -lc 'cat {out_f} 2>/dev/null'",
+                        use_sudo=True,
+                        timeout=60,
+                        quiet=True,
+                    )
+                    raw = raw or ""
+                    if code == 0:
+                        return client, 0, _short_note(raw, 0), ""
+                    return client, code, raw, ""
+                # PENDING/WAIT — verify ещё идёт, SSH уже есть
+                time.sleep(5)
+                continue
+            except (OSError, TimeoutError, paramiko.SSHException, EOFError, ConnectionError):
+                time.sleep(5)
+                continue
+
+        # Устройство не вышло / нет result за отведённое время
+        err = f"device not back / no result within {timeout}s"
+        try:
+            client = reconnect_with_retry(deadline_sec=45.0, connect_timeout=15.0)
+            _active_client = client
+            _, raw, _ = run(
+                client,
+                f"bash -lc 'tail -n 80 {out_f} 2>/dev/null; "
+                f"test -f {result_f} && cat {result_f} || true'",
+                use_sudo=True,
+                timeout=60,
+                quiet=True,
+            )
+            out = raw or ""
+            tail_lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            if tail_lines and tail_lines[-1].isdigit():
+                code = int(tail_lines[-1])
+                err = "" if code == 0 else err
+            _ = run(client, _CLEANUP_CMD, use_sudo=True, timeout=90, quiet=True)
+        except Exception:
+            code = 124
+        return client, code if code >= 0 else 124, out, err
+    finally:
+        remote.before_reconnect_log = prev_hook
 
 
 def run_one_scenario(args: list[str]) -> int:
@@ -291,15 +627,36 @@ def run_one_scenario(args: list[str]) -> int:
         print("usage: python -m deploy <device> test <scenario> [-- args...]")
         return 2
 
+    name = cmd_args[0]
     quoted = " ".join(f"'{a}'" if " " in a else a for a in cmd_args)
     remote_cmd = f"bash {remote.remote_root()}/tests/run.sh {quoted}"
     timeout = 600
-    if cmd_args[0] in _SHORT:
+    if name in _SHORT:
         timeout = 90
-    if cmd_args[0] in _LONG:
+    if name in _LONG:
         timeout = 900
+    if name in _REBOOT_SCENARIOS:
+        timeout = 600
 
     client = connect()
+    if name in _REBOOT_SCENARIOS:
+        print(f"{name} ...", flush=True, end="")
+        t0 = time.time()
+        client, code, out, err = _run_reboot(client, cmd_args, timeout)
+        sec = int(time.time() - t0)
+        tag = "PASS" if code == 0 else ("SKIP" if code == 77 else "FAIL")
+        detail = ""
+        if code != 0:
+            note = (err or _pass_note(out) or "").strip()
+            if note:
+                detail = f" — {note[:120]}"
+            elif out.strip() and code not in (0, 77):
+                print(flush=True)
+                print(out.rstrip(), flush=True)
+        print(f" {tag} ... ({sec}s){detail}", flush=True)
+        client.close()
+        return 0 if code in (0, 77) else code
+
     code, _, _ = run(client, remote_cmd, use_sudo=True, timeout=timeout)
     client.close()
     return code
@@ -483,7 +840,9 @@ def _run_suite_item(
     t0 = time.time()
     try:
         _active_client = client
-        if name in _DETACHED_SCENARIOS:
+        if name in _REBOOT_SCENARIOS:
+            client, code, out, err = _run_reboot(client, args, timeout)
+        elif name in _DETACHED_SCENARIOS:
             client, code, out, err = _run_detached(client, args, timeout)
         else:
             quoted = " ".join(args)
@@ -545,7 +904,7 @@ def _run_suite_item(
 
     sec = int(time.time() - t0)
     text = f"{out or ''}\n{err or ''}"
-    status = "PASS" if code == 0 else "FAIL"
+    status = _status_from_code(code, text)
     if code == 124:
         status = "FAIL"
         note = _pass_note(text) or (err[:120] if err else "timeout")
@@ -597,6 +956,7 @@ def run_all(duration_sec: int) -> int:
         flush=True,
     )
     print("(Ctrl+C: finish current test then stop)", flush=True)
+    _print_uplink_plan([n for n, _, _ in scenarios])
 
     round_n = 0
     total = len(scenarios)
@@ -614,8 +974,12 @@ def run_all(duration_sec: int) -> int:
             if round_n > 1:
                 print(f"— round {round_n} —", flush=True)
             round_pass = 0
+            round_skip = 0
             round_done = 0
+            round_t0 = time.time()
+            uplink_group = ""
             for i, (name, args, timeout) in enumerate(scenarios, 1):
+                uplink_group = _maybe_print_uplink_group(name, uplink_group)
                 if _stop_after_current or _force_stop:
                     print("stop: interrupt requested", flush=True)
                     break
@@ -693,8 +1057,11 @@ def run_all(duration_sec: int) -> int:
                 }
                 save_report(local, data)
                 round_done += 1
-                if str(result["status"]) == "PASS":
+                st = str(result["status"])
+                if st == "PASS":
                     round_pass += 1
+                elif st == "SKIP":
+                    round_skip += 1
                 try:
                     client = ensure_client(client, wait=True)
                     _active_client = client
@@ -712,9 +1079,12 @@ def run_all(duration_sec: int) -> int:
                     break
                 time.sleep(3)
             if round_done:
+                skip_bit = f", {round_skip} SKIP" if round_skip else ""
+                round_sec = int(time.time() - round_t0)
                 print(
-                    f"round {round_n}: {round_pass}/{round_done} PASS"
-                    + (f" (of {total})" if round_done < total else ""),
+                    f"round {round_n}: {round_pass}/{round_done} PASS{skip_bit}"
+                    + (f" (of {total})" if round_done < total else "")
+                    + f" ({round_sec}s)",
                     flush=True,
                 )
             else:
@@ -740,7 +1110,9 @@ def run_all(duration_sec: int) -> int:
     summary_raw = data.get("summary") or {}
     summary: dict[str, object] = dict(summary_raw) if isinstance(summary_raw, dict) else {}
     n_pass = sum(1 for v in summary.values() if v == "PASS")
-    print(f"  {n_pass}/{len(summary)} PASS", flush=True)
+    n_skip = sum(1 for v in summary.values() if v == "SKIP")
+    skip_bit = f", {n_skip} SKIP" if n_skip else ""
+    print(f"  {n_pass}/{len(summary)} PASS{skip_bit}", flush=True)
     for k, v in summary.items():
         _print_verdict(str(k), str(v))
     print("==============================", flush=True)
@@ -753,5 +1125,5 @@ def run_all(duration_sec: int) -> int:
         return 2
     if _force_stop:
         return 130
-    fails = [k for k, v in summary.items() if v not in ("PASS", "PENDING")]
+    fails = [k for k, v in summary.items() if v not in ("PASS", "PENDING", "SKIP")]
     return 1 if fails else 0
