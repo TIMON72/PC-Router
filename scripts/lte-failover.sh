@@ -385,10 +385,32 @@ restart_lte_stack_bg() {
     else
         reason="$(lte_recover_pick_action)"
         if [[ "$reason" == "apn_next" ]] && ! lte_apn_next_allowed; then
-            log "APN next отложен (cooldown ${APN_NEXT_COOLDOWN_SEC:-900}s) — USB reset"
-            netlog APN_NEXT_WAIT "APN next отложен cooldown" \
-              cooldown_sec="${APN_NEXT_COOLDOWN_SEC:-900}" last_ts="$(lte_last_apn_next_ts)"
-            reason="usb_reset_keep_apn"
+            local need_usb=""
+            if need_usb="$(lte_usb_reset_sched_allowed)"; then
+              log "APN next отложен (cooldown) — USB reset по лестнице outage"
+              netlog APN_NEXT_WAIT "APN next отложен cooldown" \
+                cooldown_sec="${APN_NEXT_COOLDOWN_SEC:-900}" last_ts="$(lte_last_apn_next_ts)"
+              reason="usb_reset_keep_apn"
+            else
+              log "APN next и USB reset отложены (лестница ${need_usb}s) — PPP keep"
+              netlog USB_RESET_WAIT "USB reset отложен (лестница outage)" \
+                need_sec="$need_usb" schedule="${REBOOT_SCHEDULE_SEC}"
+              reason="ppp_keep_apn"
+            fi
+        elif [[ "$reason" == "usb_reset_keep_apn" ]]; then
+            # Повторные USB-reset после первой ступени — только по лестнице reboot.
+            local stage_now fails_now need_usb=""
+            stage_now="$(lte_recover_stage_get)"
+            fails_now="$(lte_recover_stage_fails_get)"
+            if [[ "$stage_now" -gt 2 ]] \
+              || [[ "$fails_now" -ge "${LTE_RECOVER_USB_TRIES:-1}" ]]; then
+              if ! need_usb="$(lte_usb_reset_sched_allowed)"; then
+                log "USB reset отложен (лестница ${need_usb}s) — PPP keep"
+                netlog USB_RESET_WAIT "USB reset отложен (лестница outage)" \
+                  need_sec="$need_usb" schedule="${REBOOT_SCHEDULE_SEC}"
+                reason="ppp_keep_apn"
+              fi
+            fi
         fi
     fi
 
@@ -431,8 +453,10 @@ restart_lte_stack_bg() {
             systemctl stop "$LTE_UNIT" 2>/dev/null || true
             sleep 1
             lte_modem_usb_reset || true
+            lte_usb_reset_sched_mark
             if ! lte_wait_modem 90 >/dev/null; then
                 netlog LTE_RESTART_FAIL "Модем не появился после USB reset" reason="$reason"
+                lte_netlog_outage_warn "LTE не поднялся после USB reset" reason="$reason"
                 exit 1
             fi
             [[ -x "$APN_SELECT_BIN" ]] && "$APN_SELECT_BIN" reapply-last >/dev/null 2>&1 || true
@@ -464,7 +488,13 @@ restart_lte_stack_bg() {
         esac
 
         if lte_recover_wait_up "$reason"; then
+            lte_usb_reset_sched_clear
             exit 0
+        fi
+
+        if [[ "$reason" == "usb_reset_keep_apn" || "$reason" == "apn_next" ]]; then
+            lte_netlog_outage_warn "LTE не поднялся после recovery" reason="$reason" \
+              stage="$(lte_recover_stage_get)"
         fi
 
         # Эскалация стадии после неудачи текущей попытки

@@ -47,8 +47,9 @@ case "$EDGE_MODE" in
     ;;
 esac
 echo
-echo "=== ip_forward ==="
-cat /proc/sys/net/ipv4/ip_forward
+echo "=== sysctl (forward + panic) ==="
+sysctl -n net.ipv4.ip_forward kernel.softlockup_panic kernel.hardlockup_panic \
+  kernel.hung_task_panic kernel.panic_on_oops kernel.panic 2>/dev/null || true
 echo
 echo "=== dnsmasq leases ==="
 cat /var/lib/misc/dnsmasq.leases 2>/dev/null || true

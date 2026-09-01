@@ -72,8 +72,14 @@ DURATION_PRESETS: dict[str, int] = {
 # Порядок = группы uplink (см. _UPLINK_META). Внутри группы — по возрастанию риска/времени.
 _SUITE: list[tuple[str, list[str], dict[str, int]]] = [
     ("recover-selftest", ["recover-selftest"], {"timeout": 120}),
+    ("sysctl-panic", ["sysctl-panic"], {"timeout": 60}),
     ("dhcp-lan", ["dhcp-lan"], {"timeout": 60}),
     ("outage-dry", ["outage-dry", "{observe}"], {"observe": 120, "timeout_pad": 360}),
+    (
+        "panic-reboot",
+        ["panic-reboot", "{observe}"],
+        {"observe": 180, "timeout_pad": 260},
+    ),
     # WAN+LTE — оба подключены, не выдергивать
     (
         "wan-failover",
@@ -118,8 +124,10 @@ _SUITE: list[tuple[str, list[str], dict[str, int]]] = [
 # Группа uplink для suite: label → подсказка оператору (можно ли выдернуть кабель).
 _UPLINK_META: dict[str, tuple[str, str]] = {
     "recover-selftest": ("unit", "без uplink"),
+    "sysctl-panic": ("unit", "без uplink"),
     "dhcp-lan": ("LAN", "без WAN/LTE; проверка DHCP на устройстве"),
     "outage-dry": ("WAN|LTE", "нужен хотя бы один"),
+    "panic-reboot": ("WAN|LTE", "нужен WAN или LTE (не оба)"),
     "wan-failover": ("WAN+LTE", "оба подключены — не трогать"),
     "reboot-both": ("WAN+LTE", "оба подключены — не трогать"),
     "reboot-wan": ("WAN", "LTE можно отключить"),
@@ -189,6 +197,8 @@ DIAG_COMMANDS = frozenset(
         "log",
         "recover-selftest",
         "recover-lib",
+        "sysctl-panic",
+        "panic-sysctl",
         "boot-timeline",
         "timeline",
         "dhcp",
@@ -212,6 +222,7 @@ _LONG = {
     "reboot-wan",
     "reboot-lte",
     "reboot-both",
+    "panic-reboot",
 }
 
 
@@ -373,11 +384,12 @@ _DETACHED_SCENARIOS = {
     "lte-apn-firstboot",
 }
 
-# Реальный systemctl reboot: результат в state/ (не /tmp — tmpfs стирается).
+# Реальный systemctl reboot / panic→reboot: результат в state/ (не /tmp — tmpfs стирается).
 _REBOOT_SCENARIOS = {
     "reboot-wan",
     "reboot-lte",
     "reboot-both",
+    "panic-reboot",
 }
 
 _HEALTH_CMD = (

@@ -99,6 +99,11 @@ if internet_ok; then
     netlog OUTAGE_CLEAR "Интернет восстановлен" was_level="$level" outage_sec="$((now - outage_since))"
   fi
   outage_clear
+  # shellcheck disable=SC1091
+  source "${SYSTEMA_ROUTER_ROOT}/scripts/lib/lte-modem-recover.sh" 2>/dev/null || true
+  if type lte_usb_reset_sched_clear >/dev/null 2>&1; then
+    lte_usb_reset_sched_clear
+  fi
   exit 0
 fi
 
@@ -114,6 +119,11 @@ if [[ "$outage_since" -eq 0 ]]; then
   wait_started=$now
   outage_save
   netlog OUTAGE_START "Начало эпизода без интернета" level="$level"
+  # shellcheck disable=SC1091
+  source "${SYSTEMA_ROUTER_ROOT}/scripts/lib/lte-modem-recover.sh" 2>/dev/null || true
+  if type lte_netlog_outage_warn >/dev/null 2>&1; then
+    lte_netlog_outage_warn "Нет интернета" level="$level"
+  fi
 fi
 if [[ "$wait_started" -eq 0 ]]; then
   wait_started=$now
@@ -188,23 +198,33 @@ netlog REBOOT "Перезагрузка из-за длительного outage"
   level="$old_level" next_level="$level" waited_sec="$elapsed" outage_sec="$((now - outage_since))"
 logger -t systema-router -p local0.err -- "REBOOT due to outage level=$old_level waited=${elapsed}s"
 
+# shellcheck disable=SC1091
+source "${SYSTEMA_ROUTER_ROOT}/scripts/lib/lte-modem-recover.sh" 2>/dev/null || true
+if type lte_netlog_outage_warn >/dev/null 2>&1; then
+  lte_netlog_outage_warn "Перед outage-reboot" level="$old_level" waited_sec="$elapsed"
+fi
+
 # Небольшая пауза, чтобы лог успел сброситься на диск
 sleep 2
 sync
 
 # Перед soft-reboot ОС попробовать USB-reset модема (часто чинит data path без hard power)
-# shellcheck disable=SC1091
-source "${SYSTEMA_ROUTER_ROOT}/scripts/lib/lte-modem-recover.sh" 2>/dev/null || true
 if type lte_modem_usb_reset >/dev/null 2>&1; then
   netlog REBOOT_USB_RESET "USB reset модема перед outage-reboot"
   systemctl stop "${LTE_UNIT:-lte.service}" 2>/dev/null || true
   sleep 1
   lte_modem_usb_reset || true
+  if type lte_usb_reset_sched_mark >/dev/null 2>&1; then
+    lte_usb_reset_sched_mark
+  fi
   lte_wait_modem 30 >/dev/null 2>&1 || true
   # Короткая проверка: если интернет ожил — отменить reboot и сбросить outage
   if internet_ok; then
     netlog REBOOT_ABORTED "Интернет после USB reset — reboot отменён"
     outage_clear
+    if type lte_usb_reset_sched_clear >/dev/null 2>&1; then
+      lte_usb_reset_sched_clear
+    fi
     echo 0 >"$ST"
     systemctl start "${LTE_UNIT:-lte.service}" 2>/dev/null || true
     systemctl start lte-failover.service 2>/dev/null || true

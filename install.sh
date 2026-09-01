@@ -52,8 +52,9 @@ EOF
 chmod 600 /etc/netplan/50-systema-router.yaml
 netplan apply || true
 
-echo 'net.ipv4.ip_forward=1' >/etc/sysctl.d/99-router.conf
-sysctl -p /etc/sysctl.d/99-router.conf
+install -m 0644 "$ROOT_DIR/conf/sysctl-systema-router.conf" /etc/sysctl.d/99-systema-router.conf
+rm -f /etc/sysctl.d/99-router.conf
+sysctl -p /etc/sysctl.d/99-systema-router.conf
 
 export SYSTEMA_ROUTER_ROOT="$PROJECT_DIR"
 bash "$PROJECT_DIR/scripts/upgrade-failover.sh"

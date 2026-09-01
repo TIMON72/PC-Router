@@ -15,6 +15,8 @@ Commands:
   events [N] [filter]  — хвост журнала
   boot-timeline [N]    — хвост state/boot-timeline.log
   recover-selftest     — unit-check lib recovery (без железа)
+  sysctl-panic         — lockup→panic→reboot sysctl (без crash)
+  panic-reboot [observe]— sysrq panic→reboot (suite: WAN|LTE)
   wan-failover [deadline] [dwell]
   vpn-lte-boot [deadline]
   reboot-wan [observe] — реальный reboot, только WAN (+VPN)
@@ -58,6 +60,12 @@ case "$cmd" in
     ;;
   recover-selftest|recover-lib)
     bash "$TESTS_ROOT/diag/recover-lib-selftest.sh" "$@"
+    ;;
+  sysctl-panic|panic-sysctl)
+    bash "$TESTS_ROOT/diag/sysctl-panic.sh" "$@"
+    ;;
+  panic-reboot)
+    bash "$TESTS_ROOT/scenarios/panic-reboot.sh" "$@"
     ;;
   wan-failover|wan)
     bash "$TESTS_ROOT/scenarios/wan-failover.sh" "$@"

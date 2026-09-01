@@ -93,6 +93,12 @@ install -m 0644 "$ROOT_DIR/systemd/openvpn-vpn.service.d/override.conf" \
   /etc/systemd/system/openvpn@vpn.service.d/override.conf
 _subst_root "$ROOT_DIR/conf/logrotate-systema-router.conf" >/etc/logrotate.d/systema-router
 
+# sysctl: ip_forward + lockup→panic→reboot (см. conf/sysctl-systema-router.conf)
+install -m 0644 "$ROOT_DIR/conf/sysctl-systema-router.conf" /etc/sysctl.d/99-systema-router.conf
+# Убрать однострочник со старых install.sh, если остался
+rm -f /etc/sysctl.d/99-router.conf
+sysctl -p /etc/sysctl.d/99-systema-router.conf >/dev/null || true
+
 # ppp / networkd: каталоги фиксированы пакетами
 cat >/etc/ppp/ip-up.d/systema-router <<EOF
 #!/bin/bash

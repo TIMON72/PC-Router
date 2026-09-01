@@ -30,15 +30,17 @@
 cd ~/PC-Router
 sudo bash tests/run.sh list
 sudo bash tests/run.sh snap
-sudo bash tests/run.sh status        # сервисный отчёт (по умолчанию 1 день; сводка + события за окно)
-sudo bash tests/run.sh status 14     # то же за 14 дней
+sudo bash tests/run.sh status        # сервисный отчёт (по умолчанию 1 день; текущий logs.log + ротированные .gz)
+sudo bash tests/run.sh status 14     # то же за 14 дней (включая архивы logrotate)
 sudo bash tests/run.sh dhcp-lan
 sudo bash tests/run.sh recover-selftest
+sudo bash tests/run.sh sysctl-panic
 sudo bash tests/run.sh wan-failover 120 40
 sudo bash tests/run.sh vpn-lte-boot 150
 sudo bash tests/run.sh reboot-wan 180
 sudo bash tests/run.sh reboot-lte 180
 sudo bash tests/run.sh reboot-both 180
+sudo bash tests/run.sh panic-reboot 180   # sysrq panic→reboot; suite WAN|LTE
 sudo bash tests/run.sh lte-soft-fail
 sudo bash tests/run.sh lte-recover-ladder 180
 sudo bash tests/run.sh lte-apn-firstboot 150
@@ -90,9 +92,9 @@ python -m deploy pc-62 test reboot-lte -- 180
 
 | Uplink | Сценарии | Когда можно выдернуть |
 |--------|----------|------------------------|
-| unit | `recover-selftest` | — |
+| unit | `recover-selftest`, `sysctl-panic` | — |
 | **LAN** | `dhcp-lan` | без WAN/LTE; dnsmasq + число клиентов |
-| WAN\|LTE | `outage-dry` | нужен хотя бы один |
+| WAN\|LTE | `outage-dry`, `panic-reboot` | нужен **хотя бы один** (WAN или LTE) |
 | **WAN+LTE** | `wan-failover`, `reboot-both` | **оба** — не трогать |
 | **WAN** | `reboot-wan` | LTE можно отключить |
 | **LTE** | `vpn-lte-boot`, `reboot-lte`, `lte-soft-fail`, `lte-recover-ladder`, `lte-apn-firstboot` | WAN можно отключить |
@@ -100,8 +102,10 @@ python -m deploy pc-62 test reboot-lte -- 180
 | Сценарий | Что проверяет |
 |----------|----------------|
 | `recover-selftest` | unit recovery-lib без железа |
+| `sysctl-panic` | sysctl lockup→panic→reboot выставлены |
 | `dhcp-lan` | dnsmasq active, LAN-адрес, число DHCP-leases / neigh |
 | `outage-dry` | эскалация outage → REBOOT_DRY |
+| `panic-reboot` | **sysrq panic** → reboot → path+VPN (WAN или LTE, что есть) |
 | `wan-failover` | WAN↓ → LTE + VPN, возврат WAN |
 | `reboot-both` | **reboot**, WAN+LTE → приоритет WAN + VPN |
 | `reboot-wan` | **reboot**, только WAN → path=wan + VPN |

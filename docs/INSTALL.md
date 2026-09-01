@@ -251,7 +251,7 @@ python -m deploy pc-62 push
 | `state/` | APN last, outage state, usb.generation |
 | `conf/apn-profiles.conf` | База APN |
 | `scripts/` | Failover, NAT, DHCP |
-| `logs.log`, `lte-failover.log` | Журналы runtime |
+| `logs.log`, `lte-failover.log` | Журналы runtime (logrotate: weekly, 8 копий, maxage 56 дней; `status N` читает и `.gz`) |
 | `tests/` | Диагностика и сценарии на устройстве |
 | `deploy/` | CLI выкладки и удалённых тестов (с ПК) |
 | `systemd/` | Шаблоны unit (копируются в `/etc`) |

@@ -46,14 +46,46 @@ _active_path() {
   grep -E '^path=' /run/lte-failover.state 2>/dev/null | cut -d= -f2- || echo unknown
 }
 
-# Счётчики и последние события из netlog за окно (один проход awk).
+# Текущий logs.log + ротированные logs.log.N[.gz] (от старых к новым).
+_netlog_stream() {
+  local base="${1:-$NETLOG_FILE}"
+  local dir b i
+  dir="$(dirname "$base")"
+  b="$(basename "$base")"
+  for i in 12 11 10 9 8 7 6 5 4 3 2 1; do
+    if [[ -f "$dir/$b.$i.gz" ]]; then
+      zcat -f "$dir/$b.$i.gz" 2>/dev/null || true
+    elif [[ -f "$dir/$b.$i" ]]; then
+      cat "$dir/$b.$i" 2>/dev/null || true
+    fi
+  done
+  [[ -f "$base" ]] && cat "$base"
+}
+
+_netlog_has_any() {
+  local base="${1:-$NETLOG_FILE}"
+  local dir b
+  dir="$(dirname "$base")"
+  b="$(basename "$base")"
+  [[ -f "$base" ]] && return 0
+  compgen -G "$dir/$b.[0-9]*" >/dev/null 2>&1
+}
+
+# Срез netlog за окно (текущий + архивы) — один проход по файлам.
+NETLOG_WIN=""
 to_wan=0 to_lte=0 wan_down=0 lte_down=0 vpn_restart=0 usb_reseat=0
 reboot_ev=0
-if [[ -f "$NETLOG_FILE" && -n "$cutoff" ]]; then
+netlog_sources=0
+if _netlog_has_any && [[ -n "$cutoff" ]]; then
+  netlog_sources=1
+  NETLOG_WIN="$(mktemp /tmp/pc-router-status-netlog.XXXXXX)"
+  # shellcheck disable=SC2064
+  trap "rm -f '$NETLOG_WIN'" EXIT
+  _netlog_stream "$NETLOG_FILE" | awk -v cut="$cutoff" -F'|' 'NF >= 2 && $1 >= cut { print }' >"$NETLOG_WIN"
   # shellcheck disable=SC2034
   eval "$(
-    awk -v cut="$cutoff" -F'|' '
-      NF >= 2 && $1 >= cut {
+    awk -F'|' '
+      {
         if ($2 == "PATH_SWITCH" && $0 ~ /to=wan/) tw++
         if ($2 == "PATH_SWITCH" && $0 ~ /to=lte/) tl2++
         if ($2 == "WAN_DOWN") wd++
@@ -66,12 +98,17 @@ if [[ -f "$NETLOG_FILE" && -n "$cutoff" ]]; then
         printf "to_wan=%d\nto_lte=%d\nwan_down=%d\nlte_down=%d\nvpn_restart=%d\nusb_reseat=%d\nreboot_ev=%d\n",
           tw + 0, tl2 + 0, wd + 0, ld + 0, vr + 0, ur + 0, rb + 0
       }
-    ' "$NETLOG_FILE"
+    ' "$NETLOG_WIN"
   )"
 fi
 
 echo "========== PC-Router STATUS $(ts) =========="
 echo "host=$(hostname)  режим=${EDGE_MODE}  окно=${DAYS} д."
+if (( netlog_sources )); then
+  echo "netlog: $NETLOG_FILE (+ ротированные .N/.gz в окне)"
+else
+  echo "netlog: (нет файла)"
+fi
 echo
 
 # --- live snapshot ---
@@ -261,18 +298,18 @@ echo "=== APN ==="
 "$SYSTEMA_ROUTER_ROOT/scripts/lte-apn-select.sh" show 2>/dev/null | head -8 || echo "(n/a)"
 echo
 
-# --- problems (only if any in window) ---
-if [[ -f "$NETLOG_FILE" && -n "$cutoff" ]]; then
+# --- problems (only if any in window; includes rotated archives) ---
+if [[ -n "$NETLOG_WIN" && -s "$NETLOG_WIN" ]]; then
   problems="$(
-    awk -v cut="$cutoff" -F'|' '
-      NF >= 2 && $1 >= cut && $2 ~ /(DOWN|FAIL|OUTAGE|NO_UPLINK|REBOOT|RESTART_FAIL|USB_RESEAT)/ {
+    awk -F'|' '
+      $2 ~ /(DOWN|FAIL|OUTAGE|NO_UPLINK|REBOOT|RESTART_FAIL|USB_RESEAT|USB_RESET_WAIT)/ {
         split($1, dt, "T")
         sub(/\+.*/, "", dt[2])
         msg = $3
         gsub(/\|.*/, "", msg)
         printf "  %s %s  %s\n", substr(dt[1], 6), substr(dt[2], 1, 5), msg
       }
-    ' "$NETLOG_FILE" | tail -n 20
+    ' "$NETLOG_WIN" | tail -n 40
   )"
   if [[ -n "$problems" ]]; then
     echo "=== Проблемы за ${DAYS} д. ==="
@@ -282,16 +319,16 @@ if [[ -f "$NETLOG_FILE" && -n "$cutoff" ]]; then
 fi
 
 # --- path switches (only if any) ---
-if (( switch_total > 0 )) && [[ -f "$NETLOG_FILE" && -n "$cutoff" ]]; then
+if (( switch_total > 0 )) && [[ -n "$NETLOG_WIN" && -s "$NETLOG_WIN" ]]; then
   echo "=== Переключения uplink ==="
-  awk -v cut="$cutoff" -F'|' '
-    NF >= 2 && $1 >= cut && $2 == "PATH_SWITCH" {
+  awk -F'|' '
+    $2 == "PATH_SWITCH" {
       split($1, dt, "T")
       sub(/\+.*/, "", dt[2])
       dir = "?"; if ($0 ~ /to=wan/) dir = "WAN"; else if ($0 ~ /to=lte/) dir = "LTE"
       printf "  %s %s  → %s\n", substr(dt[1], 6), substr(dt[2], 1, 5), dir
     }
-  ' "$NETLOG_FILE" | tail -n 25
+  ' "$NETLOG_WIN" | tail -n 40
   echo
 fi
 

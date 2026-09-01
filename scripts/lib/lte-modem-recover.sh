@@ -23,8 +23,142 @@ LTE_RECOVER_STAGE_FAILS_FILE="${LTE_RECOVER_STAGE_FAILS_FILE:-$NETLOG_STATE_DIR/
 LTE_APN_WIDE_FILE="${LTE_APN_WIDE_FILE:-$NETLOG_STATE_DIR/lte.apn.wide}"
 LTE_LAST_APN_NEXT_TS_FILE="${LTE_LAST_APN_NEXT_TS_FILE:-$NETLOG_STATE_DIR/lte.apn.next_ts}"
 LTE_IMSI_CACHE="${LTE_IMSI_CACHE:-$NETLOG_STATE_DIR/imsi.cache}"
+# USB-reset после первой ступени лестницы — по тому же расписанию, что outage-reboot.
+: "${REBOOT_SCHEDULE_SEC:=3600,7200,14400,21600,43200,86400}"
+LTE_USB_RESET_SCHED_FILE="${LTE_USB_RESET_SCHED_FILE:-$REBOOT_STATE_DIR/usb-reset.schedule}"
 
 mkdir -p "$NETLOG_STATE_DIR" "$REBOOT_STATE_DIR" 2>/dev/null || true
+
+# Интервал ожидания для индекса лестницы (как network-failsafe schedule_wait_sec).
+lte_schedule_wait_sec() {
+  local idx="${1:-0}" IFS=',' arr n
+  read -r -a arr <<<"${REBOOT_SCHEDULE_SEC}"
+  n="${#arr[@]}"
+  [[ "$n" -lt 1 ]] && { echo 86400; return; }
+  if [[ "$idx" -ge "$n" ]]; then
+    echo "${arr[$((n - 1))]}"
+  else
+    echo "${arr[$idx]}"
+  fi
+}
+
+lte_usb_reset_sched_load() {
+  usb_reset_level=0
+  last_usb_reset=0
+  # shellcheck disable=SC1090
+  [[ -f "$LTE_USB_RESET_SCHED_FILE" ]] && source "$LTE_USB_RESET_SCHED_FILE" || true
+  usb_reset_level="${usb_reset_level:-0}"
+  last_usb_reset="${last_usb_reset:-0}"
+}
+
+lte_usb_reset_sched_save() {
+  cat >"$LTE_USB_RESET_SCHED_FILE" <<EOF
+usb_reset_level=${usb_reset_level:-0}
+last_usb_reset=${last_usb_reset:-0}
+EOF
+}
+
+lte_usb_reset_sched_clear() {
+  rm -f "$LTE_USB_RESET_SCHED_FILE" 2>/dev/null || true
+}
+
+# 0 = можно USB-reset сейчас; иначе echo need_sec и return 1.
+lte_usb_reset_sched_allowed() {
+  local now need elapsed
+  now="$(date +%s)"
+  lte_usb_reset_sched_load
+  # Первая попытка в эпизоде — сразу (лестница stage-2 / первый fallback).
+  if [[ "${last_usb_reset:-0}" -eq 0 ]]; then
+    return 0
+  fi
+  need="$(lte_schedule_wait_sec "${usb_reset_level:-0}")"
+  elapsed=$((now - last_usb_reset))
+  if [[ "$elapsed" -ge "$need" ]]; then
+    return 0
+  fi
+  echo "$need"
+  return 1
+}
+
+# Зафиксировать выполненный USB-reset и поднять ступень лестницы.
+lte_usb_reset_sched_mark() {
+  local now
+  now="$(date +%s)"
+  lte_usb_reset_sched_load
+  if [[ "${last_usb_reset:-0}" -gt 0 ]]; then
+    usb_reset_level=$((${usb_reset_level:-0} + 1))
+  else
+    usb_reset_level=0
+  fi
+  last_usb_reset=$now
+  lte_usb_reset_sched_save
+}
+
+# Краткий снимок для OUTAGE_WARN (только полезные k=v).
+lte_diag_at_query() {
+  local cmd="$1" dev="$2" out=""
+  [[ -e "$dev" ]] || return 1
+  out="$( (
+    printf 'AT\r'
+    sleep 0.2
+    printf '%s\r' "$cmd"
+    sleep 0.5
+  ) | timeout 3 cat <"$dev" 2>/dev/null | tr -d '\r' || true)"
+  echo "$out"
+}
+
+lte_diag_brief_kv() {
+  local wan=down lte=down modem=no cs=- reg=- apn=-
+  local wan_if="${WAN_IF:-enp3s0}" lte_if="${LTE_IF:-ppp0}"
+  if [[ -d "/sys/class/net/$wan_if" ]] \
+    && [[ "$(cat "/sys/class/net/$wan_if/carrier" 2>/dev/null || echo 0)" == "1" ]] \
+    && ping -I "$wan_if" -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+    wan=up
+  elif [[ -d "/sys/class/net/$wan_if" ]] \
+    && [[ "$(cat "/sys/class/net/$wan_if/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
+    wan=carrier
+  fi
+  if ip -4 addr show "$lte_if" 2>/dev/null | grep -q inet \
+    && ping -I "$lte_if" -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+    lte=up
+  elif ip -4 addr show "$lte_if" 2>/dev/null | grep -q inet; then
+    lte=ip
+  fi
+  if lte_modem_present; then
+    modem=yes
+  fi
+  apn="$(tr -d ' \n\r' <"${APN_LAST_FILE:-$REBOOT_STATE_DIR/apn.last}" 2>/dev/null || true)"
+  [[ -n "$apn" ]] || apn=-
+  local at_dev raw
+  while read -r at_dev; do
+    [[ -e "$at_dev" ]] || continue
+    raw="$(lte_diag_at_query 'AT+CSQ' "$at_dev" || true)"
+    if echo "$raw" | grep -q '+CSQ:'; then
+      cs="$(echo "$raw" | sed -n 's/.*+CSQ: *\([0-9]*\).*/\1/p' | head -1)"
+      [[ -n "$cs" ]] || cs=-
+    fi
+    raw="$(lte_diag_at_query 'AT+CEREG?' "$at_dev" || true)"
+    if echo "$raw" | grep -q '+CEREG:'; then
+      reg="$(echo "$raw" | sed -n 's/.*+CEREG: *[0-9]*,\([0-9]*\).*/\1/p' | head -1)"
+      [[ -n "$reg" ]] || reg="$(echo "$raw" | sed -n 's/.*+CEREG: *\([0-9]*\).*/\1/p' | head -1)"
+      [[ -n "$reg" ]] || reg=-
+    fi
+    [[ "$cs" != "-" || "$reg" != "-" ]] && break
+  done < <(lte_modem_at_candidates)
+  printf 'wan=%s lte=%s modem=%s cs=%s reg=%s apn=%s' "$wan" "$lte" "$modem" "$cs" "$reg" "$apn"
+}
+
+# netlog OUTAGE_WARN с кратким снимком (syslog warning).
+lte_netlog_outage_warn() {
+  local msg="${1:-Нет интернета}"
+  shift || true
+  local kv
+  # shellcheck disable=SC2207
+  kv=( $(lte_diag_brief_kv) )
+  if type netlog >/dev/null 2>&1; then
+    netlog OUTAGE_WARN "$msg" "${kv[@]}" "$@"
+  fi
+}
 
 lte_modem_present() {
   local d="${LTE_MODEM_DEV:-/dev/ttyUSB0}"
